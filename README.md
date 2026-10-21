@@ -72,6 +72,7 @@ migrations run automatically.
 | `DATABASE_PATH` | `data/rateio.sqlite` | SQLite file |
 | `MIGRATIONS_PATH` | `drizzle` | Folder with the SQL migrations |
 | `APP_PASSWORD` | *(none)* | Password that unlocks the app (see [Password](#password)); also the secret of the backup export for scripts |
+| `LEGACY_DATA_PATH` | *(none)* | Folder with the old Access app's CSV export: an empty database is filled with it on start (see [below](#on-a-server)) |
 
 ## Importing the old Access data
 
@@ -93,6 +94,25 @@ price and fund it was billed with. The billing month is the month the reading
 period ends in ("10 Nov 07 / 10 Jan 08" → January 2008). Rows without readings
 are skipped and listed. Each month's kWh price and reserve fund are the values
 most used in that month's bills.
+
+### On a server
+
+To start a server with the old history, give it the three CSVs — never through
+the repository or the image, since the repository is public — and point
+`LEGACY_DATA_PATH` at their folder. When the app opens a database without
+owners or chácaras, it imports them first and logs the summary; once there is
+data, it leaves the files alone. A password or settings already saved are
+kept.
+
+```bash
+docker run -d -p 3000:3000 -v rateio-data:/app/data \
+  -v "$PWD/legacy:/app/legacy:ro" -e LEGACY_DATA_PATH=/app/legacy \
+  -e APP_PASSWORD=… rateio
+```
+
+On Dokploy: one *File Mount* per CSV (`/app/legacy/T_Usuarios.csv`,
+`/app/legacy/T_Fatura.csv`, `/app/legacy/T_Consumo.csv`) and
+`LEGACY_DATA_PATH=/app/legacy` in the environment, then deploy.
 
 ## Production
 
