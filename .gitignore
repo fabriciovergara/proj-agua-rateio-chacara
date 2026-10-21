@@ -1,0 +1,17 @@
+node_modules
+.DS_Store
+dist
+dist-ssr
+*.local
+.env
+.tanstack
+.output
+
+# SQLite database (local data, never committed)
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Legacy Access exports contain personal data — keep them out of git
+legacy/
