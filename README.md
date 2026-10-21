@@ -116,7 +116,9 @@ session cookie gets the `Secure` flag) and append the client address to
 The `Dockerfile` builds the production image: `server.ts` on port 3000,
 running as the unprivileged `bun` user. The database is in `/app/data` —
 mount a volume there, or it is lost every time the container is replaced
-(every deploy).
+(every deploy). The container starts as root just to hand `/app/data` to
+`bun`, so files left there by root (an older image, a restore, a database
+copied in by hand) don't make the database read-only.
 
 ```bash
 docker build -t rateio .
@@ -124,8 +126,8 @@ docker run -d -p 3000:3000 -v rateio-data:/app/data -e APP_PASSWORD=… rateio
 ```
 
 On [Dokploy](https://dokploy.com): build type *Dockerfile*, a volume mount
-(not a bind mount, which would have to be writable by uid 1000) at
-`/app/data`, the domain on port 3000, and `APP_PASSWORD` in the environment.
+at `/app/data`, the domain on port 3000, and `APP_PASSWORD` in the
+environment.
 
 ### Password
 

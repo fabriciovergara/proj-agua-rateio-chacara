@@ -27,9 +27,11 @@ COPY --from=deps /app/node_modules node_modules
 COPY --from=build /app/dist dist
 COPY package.json server.ts ./
 COPY drizzle drizzle
-# Writable by the unprivileged user; a new named volume mounted here starts
-# with this ownership.
-RUN mkdir data && chown bun:bun data
-USER bun
+RUN mkdir data
 EXPOSE 3000
-CMD ["bun", "server.ts"]
+# The server runs as the unprivileged bun user, but the container starts as
+# root to first give it /app/data. Files written there as root (by an older
+# image, a restore, a database copied in by hand) stay root's, and SQLite
+# then opens the database read-only: pages load, but unlocking and saving
+# fail with "attempt to write a readonly database".
+CMD ["sh", "-c", "chown -R bun:bun /app/data && HOME=/home/bun exec setpriv --reuid=bun --regid=bun --init-groups bun server.ts"]
