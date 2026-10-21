@@ -47,6 +47,10 @@ import type { MonthSheet as MonthSheetData } from '#/server/readings.server'
 type Row = MonthSheetData['rows'][number]
 type Rates = MonthSheetData['rates']
 
+/** Chácara, Leitura atual, Valor, Pagamento: the header and every row. */
+const COLUMNS =
+  'lg:grid-cols-[minmax(15rem,1.4fr)_minmax(9rem,0.85fr)_minmax(13rem,1.15fr)_minmax(14rem,1.2fr)]'
+
 interface MonthValues {
   kwhPriceMicros: number
   reserveFundCents: number
@@ -343,10 +347,12 @@ export function MonthSheet({
       <Card className="gap-0 overflow-hidden py-0">
         <div
           aria-hidden="true"
-          className="hidden border-b bg-muted/50 px-5 py-3 text-sm font-semibold text-muted-foreground lg:grid lg:grid-cols-[minmax(15rem,1.4fr)_minmax(7rem,0.7fr)_minmax(9rem,0.85fr)_minmax(13rem,1.15fr)_minmax(14rem,1.2fr)] lg:gap-5"
+          className={cn(
+            'hidden border-b bg-muted/50 px-5 py-3 text-sm font-semibold text-muted-foreground lg:grid lg:gap-5',
+            COLUMNS,
+          )}
         >
           <span>Chácara</span>
-          <span className="text-right">Leitura anterior</span>
           <span className="text-right">Leitura atual</span>
           <span className="text-right">Valor</span>
           <span>Pagamento</span>
@@ -486,7 +492,12 @@ function ReadingRow({
   const errorId = `erro-leitura-${property.id}`
 
   return (
-    <li className="grid gap-4 border-b p-5 last:border-b-0 lg:grid-cols-[minmax(15rem,1.4fr)_minmax(7rem,0.7fr)_minmax(9rem,0.85fr)_minmax(13rem,1.15fr)_minmax(14rem,1.2fr)] lg:items-center lg:gap-5">
+    <li
+      className={cn(
+        'grid gap-4 border-b p-5 last:border-b-0 lg:items-center lg:gap-5',
+        COLUMNS,
+      )}
+    >
       <div className="flex items-start gap-3">
         <PropertyPlate name={property.name} />
         <div className="min-w-0">
@@ -508,46 +519,39 @@ function ReadingRow({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 lg:contents">
-        <div className="flex flex-col gap-1 lg:items-end">
-          {item.needsPrevious ? (
-            <>
-              <Label
-                htmlFor={`anterior-${property.id}`}
-                className="flex-col items-start gap-0 text-muted-foreground lg:items-end"
-              >
-                Leitura anterior
-                <span className="font-normal">primeira leitura</span>
-              </Label>
-              <Input
-                id={`anterior-${property.id}`}
-                className="h-11 text-right text-[1.2rem] tabular-nums md:text-[1.2rem]"
-                inputMode="numeric"
-                autoComplete="off"
-                maxLength={9}
-                value={item.previousText}
-                aria-invalid={Boolean(error) && item.previous === null}
-                onChange={(event) =>
-                  onChange({ previous: event.target.value.replace(/\D/g, '') })
-                }
-              />
-            </>
-          ) : (
-            <>
-              <span className="text-sm font-semibold text-muted-foreground lg:sr-only">
-                Leitura anterior
-              </span>
-              <span className="font-mono text-[1.35rem] font-semibold tracking-[0.08em] text-muted-foreground tabular-nums">
-                {item.previous === null ? '—' : formatNumber(item.previous)}
-              </span>
-            </>
-          )}
-        </div>
+      <div className="flex flex-col gap-3 sm:max-w-xs lg:max-w-none">
+        {/* The first reading of a chácara has nothing before it to go on. */}
+        {item.needsPrevious && (
+          <div className="flex flex-col gap-1 lg:items-end">
+            <Label
+              htmlFor={`anterior-${property.id}`}
+              className="flex-col items-start gap-0 text-muted-foreground lg:items-end"
+            >
+              Leitura anterior
+              <span className="font-normal">primeira leitura</span>
+            </Label>
+            <Input
+              id={`anterior-${property.id}`}
+              className="h-11 text-right text-[1.2rem] tabular-nums md:text-[1.2rem]"
+              inputMode="numeric"
+              autoComplete="off"
+              maxLength={9}
+              value={item.previousText}
+              aria-invalid={Boolean(error) && item.previous === null}
+              onChange={(event) =>
+                onChange({ previous: event.target.value.replace(/\D/g, '') })
+              }
+            />
+          </div>
+        )}
 
         <div className="flex flex-col gap-1">
           <Label
             htmlFor={`atual-${property.id}`}
-            className="text-muted-foreground lg:sr-only"
+            className={cn(
+              'text-muted-foreground',
+              item.needsPrevious ? 'lg:self-end' : 'lg:sr-only',
+            )}
           >
             Leitura atual
             <span className="sr-only"> de {property.name}</span>

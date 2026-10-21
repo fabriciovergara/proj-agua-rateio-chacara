@@ -2,7 +2,8 @@ import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { asc } from 'drizzle-orm'
+import { asc, eq } from 'drizzle-orm'
+import { strToU8, zipSync } from 'fflate'
 import { openDatabase } from '#/db/client.server'
 import {
   appPassword,
@@ -22,6 +23,7 @@ import {
   parseLegacyDate,
   parseLegacyPeriod,
   prefillFromLegacy,
+  readLegacyZip,
 } from './legacy.server'
 import { createOwner } from './owners.server'
 
@@ -304,5 +306,184 @@ describe('prefillFromLegacy', () => {
       `Arquivo não encontrado: ${path.join(dir, 'T_Consumo.csv')}`,
     )
     expect(db.select().from(owners).all()).toHaveLength(0)
+  })
+})
+
+describe('importing over existing data', () => {
+  const counts = (db: ReturnType<typeof openDatabase>) => ({
+    owners: db.select().from(owners).all().length,
+    properties: db.select().from(properties).all().length,
+    readings: db.select().from(readings).all().length,
+    monthRates: db.select().from(monthRates).all().length,
+  })
+
+  test('the same export again adds nothing and changes nothing', () => {
+    const db = openDatabase(':memory:')
+    const first = importLegacy(db, legacyExport())
+    const before = counts(db)
+    const again = importLegacy(db, legacyExport())
+
+    expect(again).toEqual({
+      created: 0,
+      matched: 2,
+      readings: 0,
+      existing: 3,
+      skipped: first.skipped,
+    })
+    expect(counts(db)).toEqual(before)
+    expect(describeLegacyImport(again).split('\n').slice(0, 2)).toEqual([
+      'Importados 0 proprietários/chácaras e 0 leituras.',
+      'Já estavam no app, sem mudanças: 2 chácaras e 3 leituras.',
+    ])
+  })
+
+  test('a chácara typed in the app gets only the months it lacks', () => {
+    const db = openDatabase(':memory:')
+    const owner = createOwner(db, {
+      name: 'Dona Exemplo',
+      document: '',
+      phone: '',
+      email: '',
+      notes: '',
+    })
+    const typed = db
+      .insert(properties)
+      .values({ name: 'chacara  7', ownerId: owner.id })
+      .returning()
+      .get()
+    db.insert(readings)
+      .values({
+        propertyId: typed.id,
+        year: 2007,
+        month: 3,
+        previousReading: 120,
+        currentReading: 160,
+        kwhPriceMicros: 900000,
+        reserveFundCents: 1500,
+      })
+      .run()
+
+    const result = importLegacy(db, legacyExport())
+
+    expect(result).toMatchObject({
+      created: 1,
+      matched: 1,
+      readings: 2,
+      existing: 1,
+    })
+    // Not duplicated, and its owner stays.
+    expect(
+      db
+        .select({ name: owners.name })
+        .from(owners)
+        .orderBy(asc(owners.id))
+        .all(),
+    ).toEqual([{ name: 'Dona Exemplo' }, { name: 'Quirino Exemplo' }])
+    expect(
+      db
+        .select({
+          month: readings.month,
+          current: readings.currentReading,
+          price: readings.kwhPriceMicros,
+        })
+        .from(readings)
+        .where(eq(readings.propertyId, typed.id))
+        .orderBy(asc(readings.month))
+        .all(),
+    ).toEqual([
+      { month: 2, current: 120, price: 350000 },
+      { month: 3, current: 160, price: 900000 },
+    ])
+  })
+
+  test('a renamed chácara is still found by its meter', () => {
+    const db = openDatabase(':memory:')
+    db.insert(properties)
+      .values({ name: 'Sítio do Exemplo', meterNumber: 'h 0009' })
+      .run()
+
+    expect(importLegacy(db, legacyExport())).toMatchObject({
+      created: 1,
+      matched: 1,
+    })
+    expect(db.select().from(properties).all()).toHaveLength(2)
+  })
+
+  test('a name two chácaras share is reported, not guessed', () => {
+    const db = openDatabase(':memory:')
+    db.insert(properties)
+      .values([{ name: 'Chácara 9' }, { name: 'Chácara 9' }])
+      .run()
+
+    const result = importLegacy(db, legacyExport())
+
+    expect(result).toMatchObject({ created: 1, matched: 0, readings: 2 })
+    expect(result.skipped).toEqual([
+      'Chácara 9 (código 2): o app tem mais de uma chácara com esse nome ou hidrômetro; as leituras dela não foram importadas',
+      'registro 16: fatura 3 sem usuário',
+    ])
+  })
+})
+
+describe('readLegacyZip', () => {
+  const zip = (files: Record<string, string | Uint8Array>) =>
+    zipSync(
+      Object.fromEntries(
+        Object.entries(files).map(([name, content]) => [
+          name,
+          typeof content === 'string' ? strToU8(content) : content,
+        ]),
+      ),
+    )
+
+  test('finds the CSVs in any folder and leaves other files alone', () => {
+    const data = readLegacyZip(
+      zip({
+        'Rateio/T_Usuarios.csv': USERS,
+        'Rateio/T_Fatura.csv': INVOICES,
+        // The table's name in Kw.mdb also works.
+        'Rateio/T_Cosumo.csv': CONSUMPTION,
+        'Rateio/Kw.mdb': new Uint8Array(64),
+        '__MACOSX/Rateio/._T_Usuarios.csv': new Uint8Array([0, 5, 22, 7]),
+      }),
+    )
+    expect(data).toEqual(legacyExport())
+  })
+
+  test('reads files saved by Windows programs (Windows-1252)', () => {
+    const windows1252 = Uint8Array.from(USERS, (char) => char.charCodeAt(0))
+    const data = readLegacyZip(
+      zip({
+        'T_Usuarios.csv': windows1252,
+        'T_Fatura.csv': INVOICES,
+        'T_Consumo.csv': CONSUMPTION,
+      }),
+    )
+    expect(data.users.map((user) => user.Usuario)).toEqual([
+      'Zuleica Fictícia',
+      'Quirino Exemplo',
+    ])
+  })
+
+  test('says what is wrong with the file', () => {
+    expect(() =>
+      readLegacyZip(
+        zip({ 'T_Usuarios.csv': USERS, 'T_Consumo.csv': CONSUMPTION }),
+      ),
+    ).toThrow('O .zip não tem o arquivo T_Fatura.csv.')
+    expect(() => readLegacyZip(strToU8('não é um zip'))).toThrow(
+      'Não foi possível abrir o arquivo.',
+    )
+    expect(() =>
+      readLegacyZip(
+        zip({
+          'T_Usuarios.csv': 'Nome,Telefone\nAlguém,123\n',
+          'T_Fatura.csv': INVOICES,
+          'T_Consumo.csv': CONSUMPTION,
+        }),
+      ),
+    ).toThrow(
+      'T_Usuarios.csv não é do sistema antigo: faltam as colunas CodigoUsr, Usuario.',
+    )
   })
 })

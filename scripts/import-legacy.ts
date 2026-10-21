@@ -3,18 +3,19 @@
  * as CSV (T_Usuarios.csv, T_Fatura.csv, T_Consumo.csv — e.g. with
  * `mdb-export Kw.mdb T_Usuarios > T_Usuarios.csv` from mdbtools).
  *
- *   bun run db:import-legacy <folder-with-csvs>           # empty database
+ *   bun run db:import-legacy <folder-with-csvs>           # adds what's missing
  *   bun run db:import-legacy <folder-with-csvs> --reset   # wipes data first
  *
- * Each old "usuário" becomes a proprietário and a chácara; each row of
- * T_Cosumo becomes a monthly reading, keeping the kWh price and reserve fund
- * it was billed with (see src/server/legacy.server.ts).
+ * Each old "usuário" becomes a proprietário and a chácara, unless that
+ * chácara is already in the app; each row of T_Cosumo becomes a monthly
+ * reading, keeping the kWh price and reserve fund it was billed with.
+ * Months that already have a reading are kept as they are (see
+ * src/server/legacy.server.ts).
  */
 import { openDatabase } from '#/db/client.server'
 import {
   describeLegacyImport,
   importLegacy,
-  isEmptyDatabase,
   type LegacyExport,
   readLegacyExport,
 } from '#/server/legacy.server'
@@ -39,11 +40,4 @@ try {
 
 // Not getDb(): with LEGACY_DATA_PATH set, it would fill the database first.
 const db = openDatabase(process.env.DATABASE_PATH || 'data/rateio.sqlite')
-if (!isEmptyDatabase(db) && !reset) {
-  console.error(
-    'O banco já tem dados. Use --reset para apagar tudo antes de importar.',
-  )
-  process.exit(1)
-}
-
 console.log(describeLegacyImport(importLegacy(db, data, { reset })))

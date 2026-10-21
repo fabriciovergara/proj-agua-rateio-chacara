@@ -22,12 +22,18 @@ const optionalPeriod = z.object({
 export const getMonthSheet = createServerFn({ method: 'GET' })
   .validator(optionalPeriod)
   .handler(({ data }) => {
+    const db = getDb()
     const thisMonth = currentPeriod()
     const period =
       data.year && data.month
         ? { year: data.year, month: data.month }
         : thisMonth
-    return { ...repo.getMonthSheet(getDb(), period), thisMonth }
+    return {
+      ...repo.getMonthSheet(db, period),
+      thisMonth,
+      /** Offered in the year picker: years with readings and this one. */
+      years: repo.listYears(db),
+    }
   })
 
 export const saveMonthReadings = createServerFn({ method: 'POST' })

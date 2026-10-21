@@ -6,11 +6,14 @@
  *   mdb-export Kw.mdb T_Fatura   > T_Fatura.csv
  *   mdb-export Kw.mdb T_Cosumo   > T_Consumo.csv
  *
- * Imported with `bun run db:import-legacy`, or when the app opens an empty
- * database and LEGACY_DATA_PATH points at the folder with these files.
+ * Imported from a .zip in Configurações, with `bun run db:import-legacy`,
+ * or when the app opens an empty database and LEGACY_DATA_PATH points at
+ * the folder with these files.
  */
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { eq } from 'drizzle-orm'
+import { unzipSync } from 'fflate'
 import Papa from 'papaparse'
 import type { Executor } from '#/db/client.server'
 import {
@@ -21,6 +24,7 @@ import {
   readings,
   settings,
 } from '#/db/schema'
+import { UserFacingError } from '#/lib/errors'
 import { formatPeriod, type Period, periodKey } from '#/lib/periods'
 
 const MONTHS: Record<string, number> = {
@@ -104,22 +108,118 @@ export type LegacyExport = {
   consumption: Row[]
 }
 
+/**
+ * The files and the columns the import needs from each. The consumption
+ * table is called T_Cosumo in Kw.mdb, so that file name works too.
+ */
+const TABLES = {
+  users: { files: ['T_Usuarios.csv'], columns: ['CodigoUsr', 'Usuario'] },
+  invoices: { files: ['T_Fatura.csv'], columns: ['NumeroFatura', 'CodigoUsr'] },
+  consumption: {
+    files: ['T_Consumo.csv', 'T_Cosumo.csv'],
+    columns: ['NumeroFatura', 'LeituraAtual', 'LeituraAnterior', 'Mes'],
+  },
+} as const
+
+type Table = keyof typeof TABLES
+
+/** The real CSVs have a few KB; anything this big is not one of them. */
+const MAX_CSV_BYTES = 20 * 1024 * 1024
+
 export function parseLegacyCsv(text: string): Row[] {
   return Papa.parse<Row>(text, { header: true, skipEmptyLines: true }).data
 }
 
+/** Parses one table, refusing a file without the columns it needs. */
+function parseTable(table: Table, text: string): Row[] {
+  const { data, meta } = Papa.parse<Row>(text, {
+    header: true,
+    skipEmptyLines: true,
+  })
+  const missing = TABLES[table].columns.filter(
+    (column) => !meta.fields?.includes(column),
+  )
+  if (missing.length > 0) {
+    throw new UserFacingError(
+      `${TABLES[table].files[0]} não é do sistema antigo: faltam as colunas ${missing.join(', ')}.`,
+    )
+  }
+  return data
+}
+
+/** mdb-export writes UTF-8; programs on Windows often write Windows-1252. */
+function decodeCsv(bytes: Uint8Array): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return new TextDecoder('windows-1252').decode(bytes)
+  }
+}
+
+function toLegacyExport(read: (table: Table) => Uint8Array): LegacyExport {
+  const parse = (table: Table) => parseTable(table, decodeCsv(read(table)))
+  return {
+    users: parse('users'),
+    invoices: parse('invoices'),
+    consumption: parse('consumption'),
+  }
+}
+
 /** Reads T_Usuarios.csv, T_Fatura.csv and T_Consumo.csv from `folder`. */
 export function readLegacyExport(folder: string): LegacyExport {
-  const read = (name: string) => {
-    const file = path.join(folder, name)
-    if (!existsSync(file)) throw new Error(`Arquivo não encontrado: ${file}`)
-    return parseLegacyCsv(readFileSync(file, 'utf8'))
+  return toLegacyExport((table) => {
+    const files = TABLES[table].files.map((name) => path.join(folder, name))
+    const file = files.find((candidate) => existsSync(candidate))
+    if (!file) throw new Error(`Arquivo não encontrado: ${files[0]}`)
+    return readFileSync(file)
+  })
+}
+
+const baseName = (name: string) => name.split(/[\\/]/).at(-1) ?? name
+
+/**
+ * The same CSVs inside a .zip, in any of its folders. Other files (Kw.mdb,
+ * schema.sql…) are not even unpacked.
+ */
+export function readLegacyZip(bytes: Uint8Array): LegacyExport {
+  const tableOf = new Map<string, Table>()
+  for (const [table, { files }] of Object.entries(TABLES)) {
+    for (const file of files) tableOf.set(file.toLowerCase(), table as Table)
   }
-  return {
-    users: read('T_Usuarios.csv'),
-    invoices: read('T_Fatura.csv'),
-    consumption: read('T_Consumo.csv'),
+  const entryOf = new Map<Table, string>()
+  const tooBig: string[] = []
+  let files: Record<string, Uint8Array>
+  try {
+    files = unzipSync(bytes, {
+      filter: ({ name, originalSize }) => {
+        const table = tableOf.get(baseName(name).toLowerCase())
+        if (!table || entryOf.has(table)) return false
+        if (originalSize > MAX_CSV_BYTES) {
+          tooBig.push(baseName(name))
+          return false
+        }
+        entryOf.set(table, name)
+        return true
+      },
+    })
+  } catch {
+    throw new UserFacingError(
+      'Não foi possível abrir o arquivo. Envie o .zip com os CSVs do sistema antigo.',
+    )
   }
+  if (tooBig.length > 0) {
+    throw new UserFacingError(`${tooBig[0]} é grande demais.`)
+  }
+  return toLegacyExport((table) => {
+    const entry = entryOf.get(table)
+    const file = entry === undefined ? undefined : files[entry]
+    if (!file) {
+      throw new UserFacingError(
+        `O .zip não tem o arquivo ${TABLES[table].files[0]}.`,
+      )
+    }
+    return file
+  })
 }
 
 /** No owners and no chácaras yet (the password and settings don't count). */
@@ -130,19 +230,57 @@ export function isEmptyDatabase(db: Executor): boolean {
   )
 }
 
+/** "Chácara  7" and "chacara 7" are the same chácara. */
+function comparable(value: string | null | undefined): string {
+  return (value ?? '')
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+const meterKey = (value: string | null | undefined) =>
+  comparable(value).replace(/[^a-z0-9]/g, '')
+
+/** Left on each imported owner; it also tells their code in the old app. */
+const importedNote = (code: string) =>
+  `Importado do sistema antigo (código ${code}).`
+const IMPORTED_CODE = /Importado do sistema antigo \(código (\d+)\)/
+
+export type LegacyImportResult = {
+  /** Old users that became a new owner and chácara. */
+  created: number
+  /** Old users whose chácara was already in the app. */
+  matched: number
+  /** Readings added. */
+  readings: number
+  /** Readings left out because the app already has that month. */
+  existing: number
+  /** Rows that couldn't be imported, with the reason. */
+  skipped: string[]
+}
+
 /**
- * Each old "usuário" becomes a proprietário and a chácara; each row of
- * T_Cosumo becomes a monthly reading, keeping the kWh price and reserve fund
- * it was billed with. `reset` first deletes all the data (not the password).
+ * Brings the old app's data in without changing what is already there, so
+ * it can run again, also after months typed in the new app. An old user
+ * whose chácara is in the app (imported before, or with the same name or
+ * meter) keeps it; the others become a proprietário and a chácara. Each row
+ * of T_Cosumo becomes the reading of a month the chácara doesn't have yet,
+ * with the kWh price and reserve fund it was billed with. `reset` first
+ * deletes all the data (not the password).
  */
 export function importLegacy(
   db: Executor,
   { users, invoices, consumption }: LegacyExport,
   { reset = false } = {},
-) {
+): LegacyImportResult {
   const clean = (value: string | undefined) => value?.trim() || null
   const skipped: string[] = []
+  let created = 0
+  let matched = 0
   let imported = 0
+  let existing = 0
 
   db.transaction((tx) => {
     if (reset) {
@@ -154,20 +292,66 @@ export function importLegacy(
       tx.delete(bankAccount).run()
     }
 
-    // Old user code → new chácara id
-    const propertyByUser = new Map<string, { id: number; name: string }>()
+    // The chácaras already in the app, by old code, name and meter.
+    type Place = { id: number; name: string }
+    const byCode = new Map<string, Place>()
+    const byName = new Map<string, Place[]>()
+    const byMeter = new Map<string, Place[]>()
+    const index = (map: Map<string, Place[]>, key: string, place: Place) => {
+      if (key) map.set(key, [...(map.get(key) ?? []), place])
+    }
+    const inApp = tx
+      .select({
+        id: properties.id,
+        name: properties.name,
+        meter: properties.meterNumber,
+        ownerNotes: owners.notes,
+      })
+      .from(properties)
+      .leftJoin(owners, eq(owners.id, properties.ownerId))
+      .all()
+    for (const { id, name, meter, ownerNotes } of inApp) {
+      const code = ownerNotes?.match(IMPORTED_CODE)?.[1]
+      if (code && !byCode.has(code)) byCode.set(code, { id, name })
+      index(byName, comparable(name), { id, name })
+      index(byMeter, meterKey(meter), { id, name })
+    }
+
+    // Old user code → chácara
+    const propertyByUser = new Map<string, Place>()
+    // Users left out: one line explains it, not one per reading.
+    const leftOut = new Set<string>()
     for (const user of users) {
-      const name = clean(user.Usuario) ?? `Usuário ${user.CodigoUsr}`
+      const code = String(user.CodigoUsr)
+      const name = clean(user.Usuario) ?? `Usuário ${code}`
+      const propertyName = legacyPropertyName(user.Endereco ?? '', name)
+      const known = byCode.get(code)
+      const candidates = known
+        ? [known]
+        : (byName.get(comparable(propertyName)) ??
+          byMeter.get(meterKey(user.Hidrometro)) ??
+          [])
+      if (candidates.length > 1) {
+        skipped.push(
+          `${propertyName} (código ${code}): o app tem mais de uma chácara com esse nome ou hidrômetro; as leituras dela não foram importadas`,
+        )
+        leftOut.add(code)
+        continue
+      }
+      const [found] = candidates
+      if (found) {
+        propertyByUser.set(code, found)
+        matched++
+        continue
+      }
+
       const owner = tx
         .insert(owners)
         .values({
           name,
           document: clean(user.CPF),
           phone: clean(user.Celular) ?? clean(user.Telefone),
-          notes: [
-            clean(user.Observacoes),
-            `Importado do sistema antigo (código ${user.CodigoUsr}).`,
-          ]
+          notes: [clean(user.Observacoes), importedNote(code)]
             .filter(Boolean)
             .join('\n'),
         })
@@ -176,7 +360,7 @@ export function importLegacy(
       const property = tx
         .insert(properties)
         .values({
-          name: legacyPropertyName(user.Endereco ?? '', name),
+          name: propertyName,
           ownerId: owner.id,
           meterNumber: clean(user.Hidrometro),
           notes: user.Endereco
@@ -185,7 +369,8 @@ export function importLegacy(
         })
         .returning()
         .get()
-      propertyByUser.set(String(user.CodigoUsr), property)
+      propertyByUser.set(code, property)
+      created++
     }
 
     // Old invoice number → user code
@@ -196,19 +381,31 @@ export function importLegacy(
       ]),
     )
 
+    // Months each chácara already has: those stay as they are.
+    const taken = new Set(
+      tx
+        .select({
+          propertyId: readings.propertyId,
+          year: readings.year,
+          month: readings.month,
+        })
+        .from(readings)
+        .all()
+        .map((reading) => `${reading.propertyId}:${periodKey(reading)}`),
+    )
     const seen = new Set<string>()
     // How many readings of each month used each price/fund pair.
     const ratesByMonth = new Map<string, Map<string, number>>()
 
     for (const row of consumption) {
       const label = `registro ${row.CodigoCosumo}`
+      const userCode = userByInvoice.get(String(row.NumeroFatura))
+      if (userCode !== undefined && leftOut.has(userCode)) continue
       if (!row.LeituraAtual || !row.LeituraAnterior) {
         skipped.push(`${label}: sem leitura`)
         continue
       }
-      const property = propertyByUser.get(
-        userByInvoice.get(String(row.NumeroFatura)) ?? '',
-      )
+      const property = propertyByUser.get(userCode ?? '')
       if (!property) {
         skipped.push(`${label}: fatura ${row.NumeroFatura} sem usuário`)
         continue
@@ -227,6 +424,11 @@ export function importLegacy(
         skipped.push(
           `${label}: ${property.name} já tem leitura de ${formatPeriod(period)}`,
         )
+        continue
+      }
+      if (taken.has(key)) {
+        seen.add(key)
+        existing++
         continue
       }
       const previousReading = Number(row.LeituraAnterior)
@@ -268,6 +470,7 @@ export function importLegacy(
 
     // Each month's values are the ones most of its readings were billed with;
     // the next month typed in the new app starts from the last of them.
+    // Months that already have values keep them.
     for (const [monthKey, counts] of ratesByMonth) {
       const [year, month] = monthKey.split('-').map(Number)
       const [pair] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0] ?? []
@@ -280,18 +483,25 @@ export function importLegacy(
     }
   })
 
-  return { owners: users.length, readings: imported, skipped }
+  return { created, matched, readings: imported, existing, skipped }
 }
 
 /** The import's outcome as printed by the script and the server log. */
 export function describeLegacyImport({
-  owners,
+  created,
+  matched,
   readings,
+  existing,
   skipped,
-}: ReturnType<typeof importLegacy>): string {
+}: LegacyImportResult): string {
   const lines = [
-    `Importados ${owners} proprietários/chácaras e ${readings} leituras.`,
+    `Importados ${created} proprietários/chácaras e ${readings} leituras.`,
   ]
+  if (matched > 0 || existing > 0) {
+    lines.push(
+      `Já estavam no app, sem mudanças: ${matched} chácaras e ${existing} leituras.`,
+    )
+  }
   if (skipped.length > 0) {
     lines.push(`${skipped.length} registros não importados:`)
     for (const line of skipped) lines.push(`  - ${line}`)

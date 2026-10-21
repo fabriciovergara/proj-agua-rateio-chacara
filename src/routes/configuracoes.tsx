@@ -1,11 +1,19 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { Download, KeyRound, LogOut, Trash2 } from 'lucide-react'
+import {
+  CircleCheck,
+  Download,
+  KeyRound,
+  LogOut,
+  Trash2,
+  Upload,
+} from 'lucide-react'
 import { type FormEvent, useId, useState } from 'react'
 import { toast } from 'sonner'
 import { ConfirmDialog } from '#/components/confirm-dialog'
 import { SelectField, TextField } from '#/components/form'
 import { Notice, PageHeader } from '#/components/page'
 import { PixPayment } from '#/components/reports/pix-payment'
+import { Alert, AlertDescription, AlertTitle } from '#/components/ui/alert'
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -27,6 +35,7 @@ import {
 } from '#/components/ui/card'
 import { Checkbox } from '#/components/ui/checkbox'
 import { FieldGroup } from '#/components/ui/field'
+import { Input } from '#/components/ui/input'
 import { Label } from '#/components/ui/label'
 import { Separator } from '#/components/ui/separator'
 import {
@@ -44,6 +53,7 @@ import {
   fieldErrors,
 } from '#/lib/schemas'
 import { useAction } from '#/lib/use-action'
+import { importLegacyZip } from '#/server/legacy.functions'
 import {
   clearBankAccount,
   getSettings,
@@ -82,6 +92,7 @@ function SettingsPage() {
       <BankSection key={bankKey} bank={settings.bank} />
       <PasswordSection key={lockKey} lock={settings.lock} />
       <BackupSection />
+      <LegacyImportSection />
     </div>
   )
 }
@@ -599,5 +610,114 @@ function BackupSection() {
         </Button>
       </CardContent>
     </Card>
+  )
+}
+
+type LegacyImport = Awaited<ReturnType<typeof importLegacyZip>>
+
+function LegacyImportSection() {
+  const inputId = useId()
+  const [file, setFile] = useState<File | null>(null)
+  // A new key empties the file field after an import.
+  const [inputKey, setInputKey] = useState(0)
+  const [result, setResult] = useState<LegacyImport | null>(null)
+  const upload = useAction(importLegacyZip, {
+    success: (imported) =>
+      imported.created + imported.readings > 0
+        ? 'Dados do sistema antigo importados.'
+        : 'Nada novo: esses dados já estavam no app.',
+  })
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (!file) return
+    const data = new FormData()
+    data.set('arquivo', file)
+    const imported = await upload.run({ data })
+    if (imported) {
+      setResult(imported)
+      setFile(null)
+      setInputKey((key) => key + 1)
+    }
+  }
+
+  return (
+    <Card>
+      <form onSubmit={submit} className="flex flex-col gap-6">
+        <CardHeader>
+          <CardTitle className="text-2xl">Dados do sistema antigo</CardTitle>
+          <CardDescription className="text-base">
+            Traz o histórico do programa antigo (Access): envie o arquivo .zip
+            com T_Usuarios.csv, T_Fatura.csv e T_Consumo.csv. Só entra o que
+            ainda não está no app; nada do que já existe muda.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-6">
+          <div className="flex max-w-md flex-col gap-2">
+            <Label htmlFor={inputId} className="text-base">
+              Arquivo .zip
+            </Label>
+            <Input
+              key={inputKey}
+              id={inputId}
+              type="file"
+              accept=".zip,application/zip"
+              className="h-11 py-2 text-base file:h-7 file:text-base md:text-base"
+              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            />
+          </div>
+          {result && <LegacyImportSummary result={result} />}
+        </CardContent>
+        <CardFooter>
+          <Button type="submit" size="lg" disabled={!file || upload.pending}>
+            <Upload aria-hidden="true" />
+            {upload.pending ? 'Importando…' : 'Importar'}
+          </Button>
+        </CardFooter>
+      </form>
+    </Card>
+  )
+}
+
+const count = (value: number, one: string, many: string) =>
+  `${value} ${value === 1 ? one : many}`
+
+function LegacyImportSummary({ result }: { result: LegacyImport }) {
+  return (
+    <Alert role="status" className="border-primary/30 bg-secondary">
+      <CircleCheck aria-hidden="true" />
+      <AlertTitle className="text-base">Importação concluída</AlertTitle>
+      <AlertDescription className="text-base text-foreground">
+        <ul className="list-disc space-y-1 pl-5">
+          <li>
+            {count(result.created, 'chácara nova', 'chácaras novas')} e{' '}
+            {count(result.readings, 'leitura importada', 'leituras importadas')}
+            .
+          </li>
+          {(result.matched > 0 || result.existing > 0) && (
+            <li>
+              Já estavam no app e não mudaram:{' '}
+              {count(result.matched, 'chácara', 'chácaras')} e{' '}
+              {count(result.existing, 'leitura', 'leituras')}.
+            </li>
+          )}
+          {result.skipped.length > 0 && (
+            <li>
+              {count(
+                result.skipped.length,
+                'registro não importado',
+                'registros não importados',
+              )}
+              :
+              <ul className="mt-1 list-[circle] pl-5 text-muted-foreground">
+                {result.skipped.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            </li>
+          )}
+        </ul>
+      </AlertDescription>
+    </Alert>
   )
 }

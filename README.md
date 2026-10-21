@@ -10,13 +10,13 @@ action per screen, and plain words.
 
 | Screen | What for |
 | --- | --- |
-| **Leituras** (home) | Set the month's kWh price and reserve fund (each month has its own; a calculator derives the kWh price from the pump's electricity bill), then type the reading of every chácara, like on the meter's counter. The previous reading, consumption and bill (kWh × price + reserve fund) are calculated as you type. Mark bills as paid. |
+| **Leituras** (home) | Pick the month with the arrows or the month and year dropdowns. Set the month's kWh price and reserve fund (each month has its own; a calculator, always open, derives the kWh price from the pump's electricity bill), then type the reading of every chácara, like on the meter's counter. Consumption and bill (kWh × price + reserve fund) are calculated as you type, from the previous month's reading; only a chácara's first reading asks for the previous one. Mark bills as paid. |
 | **Chácara** (`/chacaras/:id`) | The spreadsheet of one chácara from the requirements: Ano, Mês, Leitura Atual, Leitura Anterior, Consumo, Preço kWh, Custo Energia, Fundo Reserva, Total, Status. Correct or delete rows, add readings. |
 | **Histórico** | Every bill with filters (chácara, year, paid/pending) and a CSV export that opens in Excel. |
 | **Gráficos** | Energy cost per month (by chácara), consumption per chácara and payments per month, each with a table view. |
 | **Relatórios** | Monthly bill per chácara (owner, property, reading, calculation, bank details and a **Pix QR code with the amount**, plus a WhatsApp message) and the annual report per owner. Both print or save as PDF. |
 | **Cadastros** | Owners (name, document, contact, e-mail) and chácaras (name, address with CEP lookup, meter number, owner). Search by any field. |
-| **Configurações** | "Cobranças" (group name and due day), "Dados Bancários" (bank, branch, account, type, Pix key), "Senha de acesso" (the password that unlocks the app, see [Password](#password)) and a database backup download. |
+| **Configurações** | "Cobranças" (group name and due day), "Dados Bancários" (bank, branch, account, type, Pix key), "Senha de acesso" (the password that unlocks the app, see [Password](#password)), a database backup download and the import of the old Access data from a `.zip` (see [Importing the old Access data](#importing-the-old-access-data)). |
 
 Safety nets for non-technical users:
 
@@ -61,7 +61,7 @@ migrations run automatically.
 | `bun run db:generate` | New migration after changing `src/db/schema.ts` |
 | `bun run db:migrate` | Create/upgrade the database without starting the app |
 | `bun run db:seed [--reset]` | Demo data (refuses to run on a non-empty database without `--reset`) |
-| `bun run db:import-legacy <folder> [--reset]` | Import the old Access data |
+| `bun run db:import-legacy <folder> [--reset]` | Import the old Access data (adds what's missing; `--reset` wipes the data first) |
 | `bun run db:studio` | Drizzle Studio |
 
 ### Environment variables
@@ -88,12 +88,24 @@ mdb-export Kw.mdb T_Cosumo   > legacy/T_Consumo.csv
 bun run db:import-legacy legacy
 ```
 
+Or, in the app, **Configurações → Dados do sistema antigo**: send a `.zip`
+with the three CSVs (in any folder of it; other files, like `Kw.mdb`, are
+ignored). CSVs saved as Windows-1252 instead of UTF-8 work too.
+
 Each old user becomes an owner and a chácara (the chácara number is taken from
 the old address column), and each consumption row becomes a reading with the
 price and fund it was billed with. The billing month is the month the reading
 period ends in ("10 Nov 07 / 10 Jan 08" → January 2008). Rows without readings
 are skipped and listed. Each month's kWh price and reserve fund are the values
 most used in that month's bills.
+
+Importing again, or into a database that already has data, only adds what is
+missing, and nothing already there changes. An old user whose chácara is
+already in the app keeps it: imported before (the owner's notes keep the old
+code), or with the same name or meter number. Months that already have a
+reading keep it. A name or meter shared by two chácaras in the app is
+reported instead of guessed. `--reset` (script only) wipes the data first;
+the password stays.
 
 ### On a server
 

@@ -79,12 +79,16 @@ export function AppShell({ children }: { children: ReactNode }) {
             <ul className="flex gap-1 overflow-x-auto px-4 pb-3 sm:px-0 lg:pb-0">
               {NAVIGATION.map(({ to, label, icon: Icon, exact }) => (
                 <li key={to} className="shrink-0">
+                  {/* Leituras stays lit on any month (?ano=…&mes=…). */}
                   <Button
                     variant="ghost"
                     asChild
                     className="h-11 rounded-full px-4 text-base font-semibold text-muted-foreground hover:text-accent-foreground data-[status=active]:bg-primary data-[status=active]:text-primary-foreground [&_svg:not([class*='size-'])]:size-5"
                   >
-                    <Link to={to} activeOptions={{ exact }}>
+                    <Link
+                      to={to}
+                      activeOptions={{ exact, includeSearch: false }}
+                    >
                       <Icon aria-hidden="true" />
                       {label}
                     </Link>
