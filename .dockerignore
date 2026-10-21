@@ -1,0 +1,17 @@
+.git
+.context
+.vscode
+**/.DS_Store
+node_modules
+dist
+.tanstack
+.output
+*.local
+
+# Secrets and local data (personal information) never go into an image.
+.env
+.env.*
+data
+legacy
+**/*.sqlite
+**/*.sqlite-*
