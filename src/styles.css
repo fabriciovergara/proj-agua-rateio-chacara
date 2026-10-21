@@ -1,0 +1,185 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "@fontsource-variable/atkinson-hyperlegible-next";
+@import "@fontsource-variable/atkinson-hyperlegible-mono";
+
+/* shadcn's dark: styles only apply under a .dark class; the app is light-only. */
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Rateio da Água — shadcn/ui theme
+ *
+ * Audience: neighbours (often older, not used to computers) who split the
+ * electricity bill of the water pump. The stock shadcn components are kept
+ * as-is; the theme below adapts them:
+ *  - Atkinson Hyperlegible (designed for low-vision readers) at an 18px root,
+ *    so every rem-based component grows proportionally.
+ *  - Cool whitewash page, white cards, navy ink, cobalt primary taken from
+ *    the enamel house-number plates of the chácaras.
+ *  - Field borders darker than shadcn's default to keep 3:1 contrast.
+ */
+
+:root {
+  --radius: 0.625rem;
+
+  --page: #eef1ef;
+  --background: #ffffff;
+  --foreground: #17233a;
+  --card: #ffffff;
+  --card-foreground: #17233a;
+  --popover: #ffffff;
+  --popover-foreground: #17233a;
+  --primary: #1d4ba0;
+  --primary-foreground: #ffffff;
+  --secondary: #e8eefa;
+  --secondary-foreground: #183f87;
+  --muted: #f3f5f4;
+  --muted-foreground: #5d6879;
+  --accent: #e8eefa;
+  --accent-foreground: #183f87;
+  --destructive: #b3261e;
+  --border: #d6dde2;
+  --input: #7b8797;
+  --ring: #7d9fe0;
+
+  /* Chart slots, validated for colour-blind separation in this order. */
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  --chart-6: #008300;
+  --chart-7: #4a3aa7;
+  --chart-8: #e34948;
+
+  /* Payment status (always shown with an icon and a word). */
+  --paid: #136b41;
+  --paid-soft: #e2f2e8;
+  --paid-mark: #1e8a4c;
+  --pending: #8a4a00;
+  --pending-soft: #fcefd6;
+  --pending-mark: #e3a008;
+
+  /* The meter counter and the house plates. */
+  --counter: #1c2230;
+  --plate: #183f87;
+}
+
+@theme inline {
+  --font-sans:
+    "Atkinson Hyperlegible Next Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Atkinson Hyperlegible Mono Variable", ui-monospace, monospace;
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --color-page: var(--page);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+  --color-chart-7: var(--chart-7);
+  --color-chart-8: var(--chart-8);
+  --color-paid: var(--paid);
+  --color-paid-soft: var(--paid-soft);
+  --color-pending: var(--pending);
+  --color-pending-soft: var(--pending-soft);
+  --color-counter: var(--counter);
+  --color-plate: var(--plate);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    /* 18px root: every rem-based size (all shadcn components) grows with it. */
+    font-size: 112.5%;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-page font-sans text-foreground antialiased;
+    line-height: 1.5;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+}
+
+@layer components {
+  /* Enamel house-number plate: white keyline inside a cobalt plate. */
+  .plate {
+    @apply inline-flex h-11 min-w-11 shrink-0 items-center justify-center rounded-[6px] bg-plate px-[0.45rem] text-[1.05rem] font-bold tracking-[0.02em] text-white tabular-nums;
+    box-shadow:
+      inset 0 0 0 3px var(--plate),
+      inset 0 0 0 4.5px rgb(255 255 255 / 0.9);
+  }
+
+  .plate[data-size="sm"] {
+    @apply h-8 min-w-8 text-[0.8rem];
+    box-shadow:
+      inset 0 0 0 2px var(--plate),
+      inset 0 0 0 3.5px rgb(255 255 255 / 0.9);
+  }
+
+  .plate[data-size="lg"] {
+    @apply h-15 min-w-15 text-[1.5rem];
+    box-shadow:
+      inset 0 0 0 4px var(--plate),
+      inset 0 0 0 6px rgb(255 255 255 / 0.9);
+  }
+}
+
+@media print {
+  @page {
+    size: A4;
+    margin: 14mm;
+  }
+
+  html {
+    font-size: 100%;
+  }
+
+  body {
+    background: #fff;
+  }
+
+  .print-page {
+    break-after: page;
+  }
+
+  .print-page:last-child {
+    break-after: auto;
+  }
+}
