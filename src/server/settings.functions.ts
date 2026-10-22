@@ -5,11 +5,11 @@ import {
   setCookie,
 } from '@tanstack/react-start/server'
 import { z } from 'zod'
-import { getDb } from '#/db/client.server'
+import { type DB, getDb } from '#/db/client.server'
 import { MIN_PASSWORD_LENGTH } from '#/lib/domain'
-import { UserFacingError } from '#/lib/errors'
 import { bankAccountSchema, settingsSchema } from '#/lib/schemas'
 import * as auth from './auth.server'
+import { dataSummary } from './data.server'
 import * as repo from './settings.server'
 
 export const getSettings = createServerFn({ method: 'GET' }).handler(() => {
@@ -19,6 +19,13 @@ export const getSettings = createServerFn({ method: 'GET' }).handler(() => {
     bank: repo.getBankAccount(db),
     /** Which passwords exist — booleans only, never the passwords. */
     lock: auth.lockStatus(db),
+    /**
+     * Only for a browser unlocked with APP_PASSWORD, which also gets
+     * "Importar dados" and "Apagar todos os dados": how much data there is.
+     */
+    admin: auth.isUnlockedWithEnvPassword(db, getRequest())
+      ? dataSummary(db)
+      : null,
   }
 })
 
@@ -37,30 +44,30 @@ export const clearBankAccount = createServerFn({ method: 'POST' }).handler(
   },
 )
 
-/** The current password is checked here too: same brake as the unlock page. */
-async function checkingCurrentPassword(run: () => Promise<void>) {
-  const key = auth.clientKey(getRequest())
-  if (!auth.takeAttempt(key)) {
-    throw new UserFacingError(
-      'Muitas tentativas erradas. Espere 15 minutos e tente de novo.',
-    )
-  }
-  await run()
-  auth.forgiveAttempt(key)
-}
-
-/** Changing a password signs every browser out; keep this one signed in. */
-function keepThisBrowserUnlocked() {
+/**
+ * Changes a password. The current one goes through the same brake as the
+ * unlock page. Every browser is signed out except this one, which keeps
+ * what APP_PASSWORD allows if it had it or if that is the password just
+ * typed as the current one.
+ */
+async function changingPassword(
+  change: (db: DB) => Promise<auth.PasswordKind | null>,
+) {
   const db = getDb()
+  const request = getRequest()
+  const hadEnvPassword = auth.isUnlockedWithEnvPassword(db, request)
+  const typed = await auth.withPasswordBrake(request, () => change(db))
   if (!auth.lockStatus(db).locked) {
     deleteCookie(auth.SESSION_COOKIE, { path: '/' })
     return
   }
-  const { token, maxAge } = auth.createSession(db)
+  const { token, maxAge } = auth.createSession(db, {
+    withEnvPassword: hadEnvPassword || typed === 'env',
+  })
   setCookie(
     auth.SESSION_COOKIE,
     token,
-    auth.sessionCookieOptions(getRequest(), maxAge),
+    auth.sessionCookieOptions(request, maxAge),
   )
 }
 
@@ -78,15 +85,13 @@ export const setAppPassword = createServerFn({ method: 'POST' })
     }),
   )
   .handler(async ({ data }) => {
-    await checkingCurrentPassword(() => auth.setAppPassword(getDb(), data))
-    keepThisBrowserUnlocked()
+    await changingPassword((db) => auth.setAppPassword(db, data))
     return { ok: true as const }
   })
 
 export const removeAppPassword = createServerFn({ method: 'POST' })
   .validator(z.object({ current: z.string().max(200) }))
   .handler(async ({ data }) => {
-    await checkingCurrentPassword(() => auth.removeAppPassword(getDb(), data))
-    keepThisBrowserUnlocked()
+    await changingPassword((db) => auth.removeAppPassword(db, data))
     return { ok: true as const }
   })

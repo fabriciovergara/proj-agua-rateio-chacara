@@ -53,7 +53,7 @@ import {
   fieldErrors,
 } from '#/lib/schemas'
 import { useAction } from '#/lib/use-action'
-import { importLegacyZip } from '#/server/legacy.functions'
+import { importData, wipeAllData } from '#/server/admin.functions'
 import {
   clearBankAccount,
   getSettings,
@@ -80,6 +80,7 @@ function SettingsPage() {
   const settingsKey = `cobrancas-${settings.settings?.updatedAt?.getTime()}`
   const bankKey = `banco-${settings.bank?.updatedAt?.getTime()}`
   const lockKey = `senha-${settings.lock.envPassword}-${settings.lock.appPassword}`
+  const adminId = useId()
 
   return (
     <div className="flex max-w-4xl flex-col gap-10">
@@ -92,7 +93,23 @@ function SettingsPage() {
       <BankSection key={bankKey} bank={settings.bank} />
       <PasswordSection key={lockKey} lock={settings.lock} />
       <BackupSection />
-      <LegacyImportSection />
+      {settings.admin && (
+        <section aria-labelledby={adminId} className="flex flex-col gap-6 pt-2">
+          <div className="flex items-center gap-4 text-muted-foreground">
+            <Separator className="flex-1" />
+            <h2
+              id={adminId}
+              className="flex items-center gap-2 text-center text-base font-semibold"
+            >
+              <KeyRound aria-hidden="true" className="size-4 shrink-0" />
+              Só para quem entrou com a senha do servidor
+            </h2>
+            <Separator className="flex-1" />
+          </div>
+          <ImportSection />
+          <WipeSection summary={settings.admin} />
+        </section>
+      )}
     </div>
   )
 }
@@ -613,19 +630,35 @@ function BackupSection() {
   )
 }
 
-type LegacyImport = Awaited<ReturnType<typeof importLegacyZip>>
+const count = (value: number, one: string, many: string) =>
+  `${value} ${value === 1 ? one : many}`
 
-function LegacyImportSection() {
+/** "a", "a e b", "a, b e c". */
+const listOf = (items: string[]) =>
+  items.length > 1
+    ? `${items.slice(0, -1).join(', ')} e ${items.at(-1)}`
+    : (items[0] ?? '')
+
+const monthValues = (months: number) =>
+  `o preço do kWh e o fundo de reserva de ${count(months, 'mês', 'meses')}`
+
+type Imported = Awaited<ReturnType<typeof importData>>
+
+function ImportSection() {
   const inputId = useId()
   const [file, setFile] = useState<File | null>(null)
   // A new key empties the file field after an import.
   const [inputKey, setInputKey] = useState(0)
-  const [result, setResult] = useState<LegacyImport | null>(null)
-  const upload = useAction(importLegacyZip, {
-    success: (imported) =>
-      imported.created + imported.readings > 0
-        ? 'Dados do sistema antigo importados.'
-        : 'Nada novo: esses dados já estavam no app.',
+  const [result, setResult] = useState<Imported | null>(null)
+  const upload = useAction(importData, {
+    success: (imported) => {
+      if (importedNothing(imported)) {
+        return 'Nada novo: esses dados já estavam no app.'
+      }
+      return imported.from === 'backup'
+        ? 'Cópia de segurança importada.'
+        : 'Dados do sistema antigo importados.'
+    },
   })
 
   async function submit(event: FormEvent) {
@@ -645,28 +678,42 @@ function LegacyImportSection() {
     <Card>
       <form onSubmit={submit} className="flex flex-col gap-6">
         <CardHeader>
-          <CardTitle className="text-2xl">Dados do sistema antigo</CardTitle>
+          <CardTitle className="text-2xl">Importar dados</CardTitle>
           <CardDescription className="text-base">
-            Traz o histórico do programa antigo (Access): envie o arquivo .zip
-            com T_Usuarios.csv, T_Fatura.csv e T_Consumo.csv. Só entra o que
-            ainda não está no app; nada do que já existe muda.
+            Traz para o app os dados de um destes arquivos. Só entra o que ainda
+            não está no app; nada do que já existe muda.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-6">
+          <ul className="list-disc space-y-1 pl-5">
+            <li>
+              <strong>Cópia de segurança</strong> (.sqlite): o arquivo de
+              “Baixar cópia dos dados”, deste app ou de outro.
+            </li>
+            <li>
+              <strong>Dados do sistema antigo</strong> (.zip): os arquivos
+              T_Usuarios.csv, T_Fatura.csv e T_Consumo.csv do programa em
+              Access.
+            </li>
+          </ul>
+          <p className="text-muted-foreground">
+            Para deixar o app exatamente como estava na cópia, apague todos os
+            dados (logo abaixo) e depois importe a cópia.
+          </p>
           <div className="flex max-w-md flex-col gap-2">
             <Label htmlFor={inputId} className="text-base">
-              Arquivo .zip
+              Arquivo .sqlite ou .zip
             </Label>
+            {/* No `accept`: iPhones grey out .sqlite files they don't know. */}
             <Input
               key={inputKey}
               id={inputId}
               type="file"
-              accept=".zip,application/zip"
               className="h-11 py-2 text-base file:h-7 file:text-base md:text-base"
               onChange={(event) => setFile(event.target.files?.[0] ?? null)}
             />
           </div>
-          {result && <LegacyImportSummary result={result} />}
+          {result && <ImportSummary result={result} />}
         </CardContent>
         <CardFooter>
           <Button type="submit" size="lg" disabled={!file || upload.pending}>
@@ -679,21 +726,41 @@ function LegacyImportSection() {
   )
 }
 
-const count = (value: number, one: string, many: string) =>
-  `${value} ${value === 1 ? one : many}`
+/** What else a backup brought besides chácaras and readings. */
+function backupExtras(result: Imported): string[] {
+  if (result.from !== 'backup') return []
+  return [
+    result.months > 0 && monthValues(result.months),
+    result.settings && 'os dados das cobranças',
+    result.bank && 'os dados bancários',
+  ].filter((item) => typeof item === 'string')
+}
 
-function LegacyImportSummary({ result }: { result: LegacyImport }) {
+function importedNothing(result: Imported) {
+  const owners = result.from === 'backup' ? result.owners : 0
+  return (
+    result.created + result.readings + owners === 0 &&
+    backupExtras(result).length === 0
+  )
+}
+
+function ImportSummary({ result }: { result: Imported }) {
+  const added = [
+    count(result.created, 'chácara nova', 'chácaras novas'),
+    result.from === 'backup' &&
+      count(result.owners, 'proprietário novo', 'proprietários novos'),
+    count(result.readings, 'leitura importada', 'leituras importadas'),
+  ].filter((item) => typeof item === 'string')
+  const extras = backupExtras(result)
+
   return (
     <Alert role="status" className="border-primary/30 bg-secondary">
       <CircleCheck aria-hidden="true" />
       <AlertTitle className="text-base">Importação concluída</AlertTitle>
       <AlertDescription className="text-base text-foreground">
         <ul className="list-disc space-y-1 pl-5">
-          <li>
-            {count(result.created, 'chácara nova', 'chácaras novas')} e{' '}
-            {count(result.readings, 'leitura importada', 'leituras importadas')}
-            .
-          </li>
+          <li>{listOf(added)}.</li>
+          {extras.length > 0 && <li>Vieram também {listOf(extras)}.</li>}
           {(result.matched > 0 || result.existing > 0) && (
             <li>
               Já estavam no app e não mudaram:{' '}
@@ -719,5 +786,151 @@ function LegacyImportSummary({ result }: { result: LegacyImport }) {
         </ul>
       </AlertDescription>
     </Alert>
+  )
+}
+
+type DataSummary = NonNullable<Settings['admin']>
+
+/** Everything "Apagar todos os dados" would delete, in plain words. */
+function whatWouldBeDeleted(summary: DataSummary): string[] {
+  const records = [
+    summary.properties > 0 && count(summary.properties, 'chácara', 'chácaras'),
+    summary.owners > 0 &&
+      count(summary.owners, 'proprietário', 'proprietários'),
+  ].filter((item) => typeof item === 'string')
+  return [
+    records.length > 0 && listOf(records),
+    summary.readings > 0 &&
+      `${count(summary.readings, 'leitura', 'leituras')}, com os pagamentos`,
+    summary.months > 0 && monthValues(summary.months),
+    summary.settings && 'os dados das cobranças',
+    summary.bank && 'os dados bancários',
+  ].filter((item) => typeof item === 'string')
+}
+
+function WipeSection({ summary }: { summary: DataSummary }) {
+  const deleted = whatWouldBeDeleted(summary)
+
+  return (
+    <Card className="border-destructive/40">
+      <CardHeader>
+        <CardTitle className="text-2xl">Apagar todos os dados</CardTitle>
+        <CardDescription className="text-base">
+          Para começar do zero: apaga as chácaras, os proprietários, as leituras
+          e os pagamentos, os valores de cada mês, os dados das cobranças e os
+          dados bancários. As senhas não mudam.
+        </CardDescription>
+      </CardHeader>
+      <CardFooter className="flex flex-wrap items-center gap-x-4 gap-y-3">
+        {deleted.length > 0 ? (
+          <WipeDialog deleted={deleted} />
+        ) : (
+          <>
+            <Button variant="destructive" size="lg" disabled>
+              <Trash2 aria-hidden="true" />
+              Apagar todos os dados
+            </Button>
+            <p className="text-muted-foreground">O app já está vazio.</p>
+          </>
+        )}
+      </CardFooter>
+    </Card>
+  )
+}
+
+function WipeDialog({ deleted }: { deleted: string[] }) {
+  const [open, setOpen] = useState(false)
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string>()
+  const wipe = useAction(wipeAllData, {
+    success: 'Pronto: todos os dados foram apagados.',
+    onError: setError,
+  })
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    const result = await wipe.run({ data: { password } })
+    if (result) setOpen(false)
+  }
+
+  return (
+    <AlertDialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (!next) {
+          setPassword('')
+          setError(undefined)
+        }
+      }}
+    >
+      <AlertDialogTrigger asChild>
+        <Button variant="destructive" size="lg">
+          <Trash2 aria-hidden="true" />
+          Apagar todos os dados
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+        <form onSubmit={submit} className="grid gap-5">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-xl">
+              Apagar todos os dados?
+            </AlertDialogTitle>
+            {/* Classes here, not on the div: only these get merged. */}
+            <AlertDialogDescription
+              asChild
+              className="space-y-2 text-base text-foreground"
+            >
+              <div>
+                <p>Isto apaga do app, sem volta:</p>
+                <ul className="list-disc space-y-1 pl-5">
+                  {deleted.map((line) => (
+                    <li key={line}>{line}</li>
+                  ))}
+                </ul>
+                <p className="text-muted-foreground">
+                  As senhas não mudam, e este aparelho continua desbloqueado.
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex flex-col items-start gap-3 rounded-md border border-pending/40 bg-pending-soft p-4">
+            <p>
+              Baixe antes uma cópia de segurança: com ela, os dados voltam em
+              “Importar dados”.
+            </p>
+            <Button variant="outline" className="bg-card" asChild>
+              <a href="/api/backup" download>
+                <Download aria-hidden="true" />
+                Baixar cópia dos dados
+              </a>
+            </Button>
+          </div>
+          <TextField
+            label="Senha do servidor"
+            description="Para confirmar, digite a senha do servidor (APP_PASSWORD)."
+            error={error}
+            value={password}
+            onChange={(value) => {
+              setPassword(value)
+              setError(undefined)
+            }}
+            type="password"
+            autoComplete="current-password"
+            autoFocus
+          />
+          <AlertDialogFooter>
+            <AlertDialogCancel type="button">Voltar</AlertDialogCancel>
+            <Button
+              type="submit"
+              variant="destructive"
+              disabled={wipe.pending || !password}
+            >
+              {wipe.pending ? 'Apagando…' : 'Apagar tudo'}
+            </Button>
+          </AlertDialogFooter>
+        </form>
+      </AlertDialogContent>
+    </AlertDialog>
   )
 }

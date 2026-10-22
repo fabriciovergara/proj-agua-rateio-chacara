@@ -15,6 +15,7 @@ import {
   settings,
 } from '#/db/schema'
 import { addMonths, currentPeriod, type Period } from '#/lib/periods'
+import { deleteAllData } from '#/server/data.server'
 
 const db = getDb()
 const reset = process.argv.includes('--reset')
@@ -67,14 +68,7 @@ function priceFor(period: Period) {
 }
 
 db.transaction((tx) => {
-  if (reset) {
-    tx.delete(readings).run()
-    tx.delete(properties).run()
-    tx.delete(owners).run()
-    tx.delete(settings).run()
-    tx.delete(monthRates).run()
-    tx.delete(bankAccount).run()
-  }
+  if (reset) deleteAllData(tx)
 
   tx.insert(settings)
     .values({

@@ -80,6 +80,10 @@ export const appPassword = sqliteTable(
 export const sessions = sqliteTable('sessions', {
   tokenHash: text('token_hash').primaryKey(),
   credentials: text('credentials').notNull(),
+  /** Unlocked with APP_PASSWORD: may also import data and wipe it all. */
+  withEnvPassword: integer('with_env_password', { mode: 'boolean' })
+    .notNull()
+    .default(false),
   expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
   createdAt: timestamps.createdAt,
 })

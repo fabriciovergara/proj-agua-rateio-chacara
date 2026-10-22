@@ -1,10 +1,10 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { getDb } from '#/db/client.server'
 import {
-  checkPassword,
   clientKey,
   createSession,
   forgiveAttempt,
+  matchPassword,
   SESSION_COOKIE,
   safeReturnPath,
   serializeCookie,
@@ -39,13 +39,16 @@ export const Route = createFileRoute('/api/desbloquear')({
         if (!takeAttempt(key)) return retry('tentativas')
 
         const db = getDb()
-        if (!(await checkPassword(db, password))) {
+        const matched = await matchPassword(db, password)
+        if (!matched) {
           await Bun.sleep(700)
           return retry('senha')
         }
 
         forgiveAttempt(key)
-        const { token, maxAge } = createSession(db)
+        const { token, maxAge } = createSession(db, {
+          withEnvPassword: matched === 'env',
+        })
         return new Response(null, {
           status: 303,
           headers: {

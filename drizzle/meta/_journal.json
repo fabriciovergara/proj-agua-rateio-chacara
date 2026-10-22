@@ -22,6 +22,13 @@
       "when": 1792507743056,
       "tag": "0002_app_lock",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1792681030421,
+      "tag": "0003_session_env_password",
+      "breakpoints": true
     }
   ]
 }

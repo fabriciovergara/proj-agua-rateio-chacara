@@ -4,14 +4,16 @@ import { appPassword, sessions } from '#/db/schema'
 import {
   authorizeExport,
   bearerToken,
-  checkPassword,
   clientKey,
+  confirmEnvPassword,
   createSession,
   deleteSession,
   forgiveAttempt,
   isUnlocked,
+  isUnlockedWithEnvPassword,
   isValidSession,
   lockStatus,
+  matchPassword,
   readCookie,
   removeAppPassword,
   resetAttempts,
@@ -21,6 +23,7 @@ import {
   sessionCookieOptions,
   setAppPassword,
   takeAttempt,
+  withPasswordBrake,
 } from './auth.server'
 
 const originalEnv = process.env.APP_PASSWORD
@@ -61,9 +64,9 @@ describe('lock status', () => {
       locked: true,
     })
     expect(isUnlocked(db, requestWith())).toBe(false)
-    expect(await checkPassword(db, 'senha-do-servidor')).toBe(true)
-    expect(await checkPassword(db, 'senha-do-servidor ')).toBe(false)
-    expect(await checkPassword(db, '')).toBe(false)
+    expect(await matchPassword(db, 'senha-do-servidor')).toBe('env')
+    expect(await matchPassword(db, 'senha-do-servidor ')).toBeNull()
+    expect(await matchPassword(db, '')).toBeNull()
   })
 
   test('a blank APP_PASSWORD does not lock the app', () => {
@@ -80,8 +83,8 @@ describe('app password', () => {
       appPassword: true,
       locked: true,
     })
-    expect(await checkPassword(db, 'chacara-15')).toBe(true)
-    expect(await checkPassword(db, 'chacara-16')).toBe(false)
+    expect(await matchPassword(db, 'chacara-15')).toBe('app')
+    expect(await matchPassword(db, 'chacara-16')).toBeNull()
   })
 
   test('is stored as an argon2 hash, never as typed', async () => {
@@ -110,9 +113,9 @@ describe('app password', () => {
       password: 'chacara-15',
     })
     await setAppPassword(db, { current: 'chacara-15', password: 'chacara-16' })
-    expect(await checkPassword(db, 'chacara-16')).toBe(true)
-    expect(await checkPassword(db, 'chacara-15')).toBe(false)
-    expect(await checkPassword(db, 'senha-do-servidor')).toBe(true)
+    expect(await matchPassword(db, 'chacara-16')).toBe('app')
+    expect(await matchPassword(db, 'chacara-15')).toBeNull()
+    expect(await matchPassword(db, 'senha-do-servidor')).toBe('env')
   })
 
   test('removing it asks for the current password; APP_PASSWORD stays', async () => {
@@ -183,6 +186,94 @@ describe('sessions', () => {
 
     createSession(db)
     expect(db.select().from(sessions).all()).toHaveLength(1)
+  })
+})
+
+describe('sessions opened with APP_PASSWORD', () => {
+  test('tell which password was typed', async () => {
+    process.env.APP_PASSWORD = 'senha-do-servidor'
+    await setAppPassword(db, {
+      current: 'senha-do-servidor',
+      password: 'chacara-15',
+    })
+    expect(await matchPassword(db, 'senha-do-servidor')).toBe('env')
+    expect(await matchPassword(db, 'chacara-15')).toBe('app')
+    expect(await matchPassword(db, 'errada')).toBeNull()
+    expect(await matchPassword(db, '')).toBeNull()
+  })
+
+  test('only those sessions get the APP_PASSWORD options', () => {
+    process.env.APP_PASSWORD = 'senha-do-servidor'
+    const server = createSession(db, { withEnvPassword: true })
+    const other = createSession(db)
+    expect(isUnlockedWithEnvPassword(db, requestWith(server.token))).toBe(true)
+    expect(isUnlockedWithEnvPassword(db, requestWith(other.token))).toBe(false)
+    expect(isUnlocked(db, requestWith(other.token))).toBe(true)
+    expect(isUnlockedWithEnvPassword(db, requestWith())).toBe(false)
+    expect(isUnlockedWithEnvPassword(db, requestWith('inventado'))).toBe(false)
+  })
+
+  test('a new or removed APP_PASSWORD ends them', () => {
+    process.env.APP_PASSWORD = 'primeira-senha'
+    const { token } = createSession(db, { withEnvPassword: true })
+    process.env.APP_PASSWORD = 'segunda-senha'
+    expect(isUnlockedWithEnvPassword(db, requestWith(token))).toBe(false)
+    delete process.env.APP_PASSWORD
+    expect(isUnlockedWithEnvPassword(db, requestWith(token))).toBe(false)
+  })
+
+  test('changing the app password says which one confirmed it', async () => {
+    expect(
+      await setAppPassword(db, { current: '', password: 'chacara-15' }),
+    ).toBeNull()
+    process.env.APP_PASSWORD = 'senha-do-servidor'
+    expect(
+      await setAppPassword(db, {
+        current: 'chacara-15',
+        password: 'chacara-16',
+      }),
+    ).toBe('app')
+    expect(
+      await setAppPassword(db, {
+        current: 'senha-do-servidor',
+        password: 'chacara-17',
+      }),
+    ).toBe('env')
+    expect(await removeAppPassword(db, { current: 'senha-do-servidor' })).toBe(
+      'env',
+    )
+  })
+
+  test('wiping everything takes APP_PASSWORD itself', async () => {
+    process.env.APP_PASSWORD = 'senha-do-servidor'
+    await setAppPassword(db, {
+      current: 'senha-do-servidor',
+      password: 'chacara-15',
+    })
+    await expect(confirmEnvPassword(db, 'chacara-15')).rejects.toThrow(
+      'A senha do servidor está errada.',
+    )
+    await expect(confirmEnvPassword(db, '')).rejects.toThrow(
+      'A senha do servidor está errada.',
+    )
+    await confirmEnvPassword(db, 'senha-do-servidor')
+  })
+
+  test('passwords typed to confirm go through the brake', async () => {
+    process.env.APP_PASSWORD = 'senha-do-servidor'
+    const request = new Request('http://localhost/', {
+      headers: { 'x-real-ip': '203.0.113.5' },
+    })
+    for (let i = 0; i < 10; i++) {
+      await expect(
+        withPasswordBrake(request, () => confirmEnvPassword(db, 'errada')),
+      ).rejects.toThrow('A senha do servidor está errada.')
+    }
+    await expect(
+      withPasswordBrake(request, () =>
+        confirmEnvPassword(db, 'senha-do-servidor'),
+      ),
+    ).rejects.toThrow('Muitas tentativas erradas.')
   })
 })
 

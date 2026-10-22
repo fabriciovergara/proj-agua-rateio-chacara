@@ -31,8 +31,9 @@ export function ConfirmDialog({
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle className="text-xl">{title}</AlertDialogTitle>
-          <AlertDialogDescription asChild>
-            <div className="space-y-2 text-base">{description}</div>
+          {/* Classes here, not on the div: only these get merged. */}
+          <AlertDialogDescription asChild className="space-y-2 text-base">
+            <div>{description}</div>
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

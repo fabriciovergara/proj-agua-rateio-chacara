@@ -10,7 +10,9 @@ import * as schema from './schema'
 const DEFAULT_DATABASE_PATH = 'data/rateio.sqlite'
 // Resolved from the working directory: the server code gets bundled into
 // dist/, so paths relative to this file would not survive a production build.
-const MIGRATIONS_FOLDER = path.resolve(process.env.MIGRATIONS_PATH || 'drizzle')
+export const MIGRATIONS_FOLDER = path.resolve(
+  process.env.MIGRATIONS_PATH || 'drizzle',
+)
 
 /**
  * Opens (or creates) the SQLite database and applies pending migrations, so a

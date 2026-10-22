@@ -16,7 +16,7 @@ action per screen, and plain words.
 | **Gráficos** | Energy cost per month (by chácara), consumption per chácara and payments per month, each with a table view. |
 | **Relatórios** | Monthly bill per chácara (owner, property, reading, calculation, bank details and a **Pix QR code with the amount**, plus a WhatsApp message) and the annual report per owner. Both print or save as PDF. |
 | **Cadastros** | Owners (name, document, contact, e-mail) and chácaras (name, address with CEP lookup, meter number, owner). Search by any field. |
-| **Configurações** | "Cobranças" (group name and due day), "Dados Bancários" (bank, branch, account, type, Pix key), "Senha de acesso" (the password that unlocks the app, see [Password](#password)), a database backup download and the import of the old Access data from a `.zip` (see [Importing the old Access data](#importing-the-old-access-data)). |
+| **Configurações** | "Cobranças" (group name and due day), "Dados Bancários" (bank, branch, account, type, Pix key), "Senha de acesso" (the password that unlocks the app, see [Password](#password)) and a database backup download. Unlocked with `APP_PASSWORD`, also "Importar dados" (a backup or the old Access data, see [Backup and restore](#backup-and-restore) and [Importing the old Access data](#importing-the-old-access-data)) and "Apagar todos os dados". |
 
 Safety nets for non-technical users:
 
@@ -88,9 +88,10 @@ mdb-export Kw.mdb T_Cosumo   > legacy/T_Consumo.csv
 bun run db:import-legacy legacy
 ```
 
-Or, in the app, **Configurações → Dados do sistema antigo**: send a `.zip`
-with the three CSVs (in any folder of it; other files, like `Kw.mdb`, are
-ignored). CSVs saved as Windows-1252 instead of UTF-8 work too.
+Or, in the app, **Configurações → Importar dados** (only when unlocked with
+`APP_PASSWORD`): send a `.zip` with the three CSVs (in any folder of it; other
+files, like `Kw.mdb`, are ignored). CSVs saved as Windows-1252 instead of
+UTF-8 work too.
 
 Each old user becomes an owner and a chácara (the chácara number is taken from
 the old address column), and each consumption row becomes a reading with the
@@ -104,8 +105,8 @@ missing, and nothing already there changes. An old user whose chácara is
 already in the app keeps it: imported before (the owner's notes keep the old
 code), or with the same name or meter number. Months that already have a
 reading keep it. A name or meter shared by two chácaras in the app is
-reported instead of guessed. `--reset` (script only) wipes the data first;
-the password stays.
+reported instead of guessed. `--reset` wipes the data first, like
+**Apagar todos os dados** in the app; the password stays.
 
 ### On a server
 
@@ -173,7 +174,8 @@ unlocks the app:
 - **`APP_PASSWORD`**: set by whoever runs the server. It can't be changed from
   the app, so it is also the way back in when the other one is forgotten. It
   is also the secret of the [backup export](#scheduled-backups) — make it
-  long.
+  long — and the only one that opens **Importar dados** and **Apagar todos
+  os dados** in Configurações.
 
 How the lock works:
 
@@ -188,6 +190,11 @@ How the lock works:
   60 days on that device. *Sair deste aparelho* ends it. Changing or removing
   a password signs all devices out, except the one that did it in
   Configurações.
+- A session remembers whether `APP_PASSWORD` opened it. Only those sessions
+  see **Importar dados** and **Apagar todos os dados** in Configurações, and
+  the server refuses both to any other session; wiping also asks for
+  `APP_PASSWORD` again. Sessions from before this was added don't count: use
+  *Sair deste aparelho* and unlock with `APP_PASSWORD` once.
 - Wrong passwords are throttled: 10 attempts per client and 30 in total every
   15 minutes (devices already unlocked are not affected).
 - With a password, responses are sent with `Cache-Control: private, no-store`,
@@ -200,10 +207,27 @@ the password in Configurações. Or remove it directly:
 ### Backup and restore
 
 *Configurações → Cópia de segurança* downloads a consistent copy of the
-database (`VACUUM INTO`). To restore, stop the server and replace
-`data/rateio.sqlite` with the downloaded file (delete any `-wal`/`-shm` files
-next to it). The copy keeps the password set in Configurações and leaves out
-the sessions, so after a restore every device asks for the password again.
+database (`VACUUM INTO`). The copy keeps the password set in Configurações and
+leaves out the sessions.
+
+To restore it in the app, unlocked with `APP_PASSWORD`: **Configurações →
+Apagar todos os dados** (it asks for `APP_PASSWORD` again and keeps the
+passwords), then send the file in **Importar dados**. The app comes back as
+it was in the copy, with the same record numbers in the addresses
+(`/chacaras/3`). Passwords never come from a copy.
+
+Without wiping first, **Importar dados** only adds what the app doesn't have
+yet, like the old Access data: a chácara with the same name or meter is the
+same chácara and only gets the months it lacks (its owner and readings stay as
+they are), a new chácara's owner is the proprietário with the same name if
+there is one, and "Cobranças", "Dados Bancários" and each month's kWh price and
+reserve fund come only when the app has none. A copy made by an older version
+of the app is brought up to date with the migrations on the way in; one made by
+a newer version is refused.
+
+Or, with the server stopped, replace `data/rateio.sqlite` with the downloaded
+file (delete any `-wal`/`-shm` files next to it). That also brings back the
+copy's password, and every device asks for the password again.
 
 #### Scheduled backups
 

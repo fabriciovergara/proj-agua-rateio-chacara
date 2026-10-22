@@ -10,7 +10,9 @@ import { UserFacingError } from '#/lib/errors'
  *  - APP_PASSWORD in the server environment, and/or
  *  - a password set in Configurações (stored as an argon2id hash).
  * Either one unlocks. A successful unlock creates a session: a random token
- * in an HttpOnly cookie, stored server-side only as a SHA-256 hash.
+ * in an HttpOnly cookie, stored server-side only as a SHA-256 hash. The
+ * session remembers whether APP_PASSWORD opened it: only those browsers may
+ * import data and wipe it all.
  */
 
 export const SESSION_COOKIE = 'rateio_sessao'
@@ -53,18 +55,22 @@ function equalsInConstantTime(a: string, b: string): boolean {
   )
 }
 
-export async function checkPassword(
+/** APP_PASSWORD or the one set in Configurações. */
+export type PasswordKind = 'env' | 'app'
+
+/** Which password `candidate` is, if any (APP_PASSWORD wins a tie). */
+export async function matchPassword(
   db: Executor,
   candidate: string,
-): Promise<boolean> {
-  if (!candidate) return false
+): Promise<PasswordKind | null> {
+  if (!candidate) return null
   const env = envPassword()
-  if (env && equalsInConstantTime(candidate, env)) return true
+  if (env && equalsInConstantTime(candidate, env)) return 'env'
   const hash = storedHash(db)
-  return hash ? Bun.password.verify(candidate, hash) : false
+  return hash && (await Bun.password.verify(candidate, hash)) ? 'app' : null
 }
 
-export function createSession(db: Executor) {
+export function createSession(db: Executor, { withEnvPassword = false } = {}) {
   const token = randomBytes(32).toString('base64url')
   const now = Date.now()
   db.delete(sessions)
@@ -74,24 +80,29 @@ export function createSession(db: Executor) {
     .values({
       tokenHash: sha256(token),
       credentials: credentialsFingerprint(db),
+      withEnvPassword,
       expiresAt: new Date(now + SESSION_DAYS * 86_400_000),
     })
     .run()
   return { token, maxAge: SESSION_DAYS * 86_400 }
 }
 
-export function isValidSession(db: Executor, token: string | undefined) {
-  if (!token) return false
+function validSession(db: Executor, token: string | undefined) {
+  if (!token) return null
   const session = db
     .select()
     .from(sessions)
     .where(eq(sessions.tokenHash, sha256(token)))
     .get()
-  return (
-    session !== undefined &&
+  return session !== undefined &&
     session.expiresAt.getTime() > Date.now() &&
     session.credentials === credentialsFingerprint(db)
-  )
+    ? session
+    : null
+}
+
+export function isValidSession(db: Executor, token: string | undefined) {
+  return validSession(db, token) !== null
 }
 
 export function deleteSession(db: Executor, token: string | undefined) {
@@ -125,6 +136,20 @@ export function isUnlocked(db: Executor, request: Request): boolean {
     db,
     readCookie(request.headers.get('cookie'), SESSION_COOKIE),
   )
+}
+
+/**
+ * Was this browser unlocked with APP_PASSWORD? Only then Configurações
+ * imports data and wipes it all. Never without APP_PASSWORD, and a new
+ * APP_PASSWORD ends these sessions like any other.
+ */
+export function isUnlockedWithEnvPassword(
+  db: Executor,
+  request: Request,
+): boolean {
+  if (envPassword() === null) return false
+  const token = readCookie(request.headers.get('cookie'), SESSION_COOKIE)
+  return validSession(db, token)?.withEnvPassword === true
 }
 
 export function isSecureRequest(request: Request): boolean {
@@ -240,6 +265,25 @@ export function resetAttempts() {
   attempts.clear()
 }
 
+/**
+ * A password typed to confirm something, not to unlock, goes through the
+ * same brake: `check` throws when it is wrong.
+ */
+export async function withPasswordBrake<T>(
+  request: Request,
+  check: () => Promise<T>,
+): Promise<T> {
+  const key = clientKey(request)
+  if (!takeAttempt(key)) {
+    throw new UserFacingError(
+      'Muitas tentativas erradas. Espere 15 minutos e tente de novo.',
+    )
+  }
+  const result = await check()
+  forgiveAttempt(key)
+  return result
+}
+
 /** The secret of `Authorization: Bearer <secret>`, as received. */
 export function bearerToken(request: Request): string | null {
   const match = request.headers.get('authorization')?.match(/^Bearer +(.+)$/i)
@@ -273,17 +317,34 @@ export function authorizeExport(
   return 'allowed'
 }
 
+async function requireCurrentPassword(
+  db: Executor,
+  current: string,
+): Promise<PasswordKind> {
+  const matched = await matchPassword(db, current)
+  if (!matched) throw new UserFacingError('A senha atual está errada.')
+  return matched
+}
+
+/** Wiping all the data asks for APP_PASSWORD itself, not just any password. */
+export async function confirmEnvPassword(db: Executor, candidate: string) {
+  if ((await matchPassword(db, candidate)) !== 'env') {
+    throw new UserFacingError('A senha do servidor está errada.')
+  }
+}
+
 /**
  * Sets the Configurações password. When the app is already locked the
- * current password (either one) is required. Signs every browser out.
+ * current password (either one) is required; returns which one it was.
+ * Signs every browser out.
  */
 export async function setAppPassword(
   db: Executor,
   input: { current: string; password: string },
-) {
-  if (lockStatus(db).locked && !(await checkPassword(db, input.current))) {
-    throw new UserFacingError('A senha atual está errada.')
-  }
+): Promise<PasswordKind | null> {
+  const matched = lockStatus(db).locked
+    ? await requireCurrentPassword(db, input.current)
+    : null
   if (input.password.length < MIN_PASSWORD_LENGTH) {
     throw new UserFacingError(
       `Use pelo menos ${MIN_PASSWORD_LENGTH} letras ou números.`,
@@ -298,16 +359,19 @@ export async function setAppPassword(
     })
     .run()
   db.delete(sessions).run()
+  return matched
 }
 
-/** Removes the Configurações password (APP_PASSWORD, if set, still applies). */
+/**
+ * Removes the Configurações password (APP_PASSWORD, if set, still applies).
+ * Returns which password confirmed it.
+ */
 export async function removeAppPassword(
   db: Executor,
   input: { current: string },
-) {
-  if (!(await checkPassword(db, input.current))) {
-    throw new UserFacingError('A senha atual está errada.')
-  }
+): Promise<PasswordKind> {
+  const matched = await requireCurrentPassword(db, input.current)
   db.delete(appPassword).run()
   db.delete(sessions).run()
+  return matched
 }

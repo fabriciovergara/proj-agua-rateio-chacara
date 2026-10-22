@@ -16,16 +16,10 @@ import { eq } from 'drizzle-orm'
 import { unzipSync } from 'fflate'
 import Papa from 'papaparse'
 import type { Executor } from '#/db/client.server'
-import {
-  bankAccount,
-  monthRates,
-  owners,
-  properties,
-  readings,
-  settings,
-} from '#/db/schema'
+import { monthRates, owners, properties, readings } from '#/db/schema'
 import { UserFacingError } from '#/lib/errors'
 import { formatPeriod, type Period, periodKey } from '#/lib/periods'
+import { deleteAllData } from './data.server'
 
 const MONTHS: Record<string, number> = {
   jan: 1,
@@ -231,7 +225,7 @@ export function isEmptyDatabase(db: Executor): boolean {
 }
 
 /** "Chácara  7" and "chacara 7" are the same chácara. */
-function comparable(value: string | null | undefined): string {
+export function comparable(value: string | null | undefined): string {
   return (value ?? '')
     .normalize('NFD')
     .replace(/\p{Diacritic}/gu, '')
@@ -247,6 +241,72 @@ const meterKey = (value: string | null | undefined) =>
 const importedNote = (code: string) =>
   `Importado do sistema antigo (código ${code}).`
 const IMPORTED_CODE = /Importado do sistema antigo \(código (\d+)\)/
+
+/** A chácara already in the app. */
+export type Place = { id: number; name: string }
+
+/**
+ * The chácaras already in the app, to recognize an imported one: by its
+ * owner's code in the old app (when given), else by name, else by meter.
+ * More than one result means the app can't tell which one it is.
+ */
+export function chacarasInApp(db: Executor) {
+  const byCode = new Map<string, Place>()
+  const byName = new Map<string, Place[]>()
+  const byMeter = new Map<string, Place[]>()
+  const index = (map: Map<string, Place[]>, key: string, place: Place) => {
+    if (key) map.set(key, [...(map.get(key) ?? []), place])
+  }
+  const inApp = db
+    .select({
+      id: properties.id,
+      name: properties.name,
+      meter: properties.meterNumber,
+      ownerNotes: owners.notes,
+    })
+    .from(properties)
+    .leftJoin(owners, eq(owners.id, properties.ownerId))
+    .all()
+  for (const { id, name, meter, ownerNotes } of inApp) {
+    const code = ownerNotes?.match(IMPORTED_CODE)?.[1]
+    if (code && !byCode.has(code)) byCode.set(code, { id, name })
+    index(byName, comparable(name), { id, name })
+    index(byMeter, meterKey(meter), { id, name })
+  }
+
+  return (chacara: {
+    code?: string
+    name: string
+    meter: string | null | undefined
+  }): Place[] => {
+    const known = chacara.code ? byCode.get(chacara.code) : undefined
+    if (known) return [known]
+    return (
+      byName.get(comparable(chacara.name)) ??
+      byMeter.get(meterKey(chacara.meter)) ??
+      []
+    )
+  }
+}
+
+/** Identifies a chácara's month in `monthsInApp`. */
+export const chacaraMonth = (propertyId: number, period: Period) =>
+  `${propertyId}:${periodKey(period)}`
+
+/** The months each chácara already has a reading for. */
+export function monthsInApp(db: Executor): Set<string> {
+  return new Set(
+    db
+      .select({
+        propertyId: readings.propertyId,
+        year: readings.year,
+        month: readings.month,
+      })
+      .from(readings)
+      .all()
+      .map((reading) => chacaraMonth(reading.propertyId, reading)),
+  )
+}
 
 export type LegacyImportResult = {
   /** Old users that became a new owner and chácara. */
@@ -283,39 +343,9 @@ export function importLegacy(
   let existing = 0
 
   db.transaction((tx) => {
-    if (reset) {
-      tx.delete(readings).run()
-      tx.delete(properties).run()
-      tx.delete(owners).run()
-      tx.delete(settings).run()
-      tx.delete(monthRates).run()
-      tx.delete(bankAccount).run()
-    }
+    if (reset) deleteAllData(tx)
 
-    // The chácaras already in the app, by old code, name and meter.
-    type Place = { id: number; name: string }
-    const byCode = new Map<string, Place>()
-    const byName = new Map<string, Place[]>()
-    const byMeter = new Map<string, Place[]>()
-    const index = (map: Map<string, Place[]>, key: string, place: Place) => {
-      if (key) map.set(key, [...(map.get(key) ?? []), place])
-    }
-    const inApp = tx
-      .select({
-        id: properties.id,
-        name: properties.name,
-        meter: properties.meterNumber,
-        ownerNotes: owners.notes,
-      })
-      .from(properties)
-      .leftJoin(owners, eq(owners.id, properties.ownerId))
-      .all()
-    for (const { id, name, meter, ownerNotes } of inApp) {
-      const code = ownerNotes?.match(IMPORTED_CODE)?.[1]
-      if (code && !byCode.has(code)) byCode.set(code, { id, name })
-      index(byName, comparable(name), { id, name })
-      index(byMeter, meterKey(meter), { id, name })
-    }
+    const findInApp = chacarasInApp(tx)
 
     // Old user code → chácara
     const propertyByUser = new Map<string, Place>()
@@ -325,12 +355,11 @@ export function importLegacy(
       const code = String(user.CodigoUsr)
       const name = clean(user.Usuario) ?? `Usuário ${code}`
       const propertyName = legacyPropertyName(user.Endereco ?? '', name)
-      const known = byCode.get(code)
-      const candidates = known
-        ? [known]
-        : (byName.get(comparable(propertyName)) ??
-          byMeter.get(meterKey(user.Hidrometro)) ??
-          [])
+      const candidates = findInApp({
+        code,
+        name: propertyName,
+        meter: user.Hidrometro,
+      })
       if (candidates.length > 1) {
         skipped.push(
           `${propertyName} (código ${code}): o app tem mais de uma chácara com esse nome ou hidrômetro; as leituras dela não foram importadas`,
@@ -382,17 +411,7 @@ export function importLegacy(
     )
 
     // Months each chácara already has: those stay as they are.
-    const taken = new Set(
-      tx
-        .select({
-          propertyId: readings.propertyId,
-          year: readings.year,
-          month: readings.month,
-        })
-        .from(readings)
-        .all()
-        .map((reading) => `${reading.propertyId}:${periodKey(reading)}`),
-    )
+    const taken = monthsInApp(tx)
     const seen = new Set<string>()
     // How many readings of each month used each price/fund pair.
     const ratesByMonth = new Map<string, Map<string, number>>()
@@ -419,7 +438,7 @@ export function importLegacy(
         skipped.push(`${label}: período "${row.Mes}" não reconhecido`)
         continue
       }
-      const key = `${property.id}:${periodKey(period)}`
+      const key = chacaraMonth(property.id, period)
       if (seen.has(key)) {
         skipped.push(
           `${label}: ${property.name} já tem leitura de ${formatPeriod(period)}`,
