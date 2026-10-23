@@ -12,7 +12,7 @@
  * chácara already has a reading keep it as it is (see
  * src/server/legacy.server.ts).
  */
-import { openDatabase } from '#/db/client.server'
+import { getDb } from '#/db/client.server'
 import {
   describeLegacyImport,
   importLegacy,
@@ -38,6 +38,4 @@ try {
   process.exit(1)
 }
 
-// Not getDb(): with LEGACY_DATA_PATH set, it would fill the database first.
-const db = openDatabase(process.env.DATABASE_PATH || 'data/rateio.sqlite')
-console.log(describeLegacyImport(importLegacy(db, data, { reset })))
+console.log(describeLegacyImport(importLegacy(getDb(), data, { reset })))

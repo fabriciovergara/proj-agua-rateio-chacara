@@ -78,7 +78,6 @@ migrations run automatically.
 | `DATABASE_PATH` | `data/rateio.sqlite` | SQLite file |
 | `MIGRATIONS_PATH` | `drizzle` | Folder with the SQL migrations |
 | `APP_PASSWORD` | *(none)* | Password that unlocks the app (see [Password](#password)); also the secret of the backup export for scripts |
-| `LEGACY_DATA_PATH` | *(none)* | Folder with the old Access app's CSV export: an empty database is filled with it on start (see [below](#on-a-server)) |
 
 ## Importing the old Access data
 
@@ -116,24 +115,9 @@ in it keeps it. A name or meter shared by two chácaras in the app is
 reported instead of guessed. `--reset` wipes the data first, like
 **Apagar todos os dados** in the app; the password stays.
 
-### On a server
-
-To start a server with the old history, give it the three CSVs — never through
-the repository or the image, since the repository is public — and point
-`LEGACY_DATA_PATH` at their folder. When the app opens a database without
-owners or chácaras, it imports them first and logs the summary; once there is
-data, it leaves the files alone. A password or settings already saved are
-kept.
-
-```bash
-docker run -d -p 3000:3000 -v rateio-data:/app/data \
-  -v "$PWD/legacy:/app/legacy:ro" -e LEGACY_DATA_PATH=/app/legacy \
-  -e APP_PASSWORD=… rateio
-```
-
-On Dokploy: one *File Mount* per CSV (`/app/legacy/T_Usuarios.csv`,
-`/app/legacy/T_Fatura.csv`, `/app/legacy/T_Consumo.csv`) and
-`LEGACY_DATA_PATH=/app/legacy` in the environment, then deploy.
+The old data only comes in through these two imports, never on its own (not
+even into an empty database), so data wiped with **Apagar todos os dados**
+stays wiped through restarts and deploys.
 
 ## Production
 

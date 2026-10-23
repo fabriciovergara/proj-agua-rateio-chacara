@@ -4,7 +4,6 @@ import path from 'node:path'
 import { drizzle } from 'drizzle-orm/bun-sqlite'
 import { migrate } from 'drizzle-orm/bun-sqlite/migrator'
 import type { BaseSQLiteDatabase } from 'drizzle-orm/sqlite-core'
-import { prefillFromLegacy } from '#/server/legacy.server'
 import * as schema from './schema'
 
 const DEFAULT_DATABASE_PATH = 'data/rateio.sqlite'
@@ -42,23 +41,9 @@ export type Executor = BaseSQLiteDatabase<'sync', void, typeof schema>
 // Reuse one connection across Vite hot reloads in development.
 const globalForDb = globalThis as { __rateioDb?: DB }
 
-/**
- * The app's database. With LEGACY_DATA_PATH set, an empty one is first
- * filled with the old Access app's data (see src/server/legacy.server.ts).
- */
 export function getDb(): DB {
-  if (!globalForDb.__rateioDb) {
-    const db = openDatabase(process.env.DATABASE_PATH || DEFAULT_DATABASE_PATH)
-    const legacyFolder = process.env.LEGACY_DATA_PATH?.trim()
-    if (legacyFolder) {
-      try {
-        prefillFromLegacy(db, legacyFolder)
-      } catch (error) {
-        db.$client.close()
-        throw error
-      }
-    }
-    globalForDb.__rateioDb = db
-  }
+  globalForDb.__rateioDb ??= openDatabase(
+    process.env.DATABASE_PATH || DEFAULT_DATABASE_PATH,
+  )
   return globalForDb.__rateioDb
 }

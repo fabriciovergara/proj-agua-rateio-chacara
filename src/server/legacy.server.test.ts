@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -17,7 +17,7 @@ import {
   parseLegacyCsv,
   parseLegacyDate,
   parseLegacyPeriod,
-  prefillFromLegacy,
+  readLegacyExport,
   readLegacyZip,
 } from './legacy.server'
 import { createOwner } from './owners.server'
@@ -298,16 +298,10 @@ describe('importLegacy', () => {
   })
 })
 
-describe('prefillFromLegacy', () => {
+describe('readLegacyExport', () => {
   let folder: string | undefined
 
-  function writeExport(
-    files: Record<string, string> = {
-      'T_Usuarios.csv': USERS,
-      'T_Fatura.csv': INVOICES,
-      'T_Consumo.csv': CONSUMPTION,
-    },
-  ) {
+  function writeExport(files: Record<string, string>) {
     folder = mkdtempSync(path.join(os.tmpdir(), 'rateio-legacy-'))
     for (const [name, content] of Object.entries(files)) {
       writeFileSync(path.join(folder, name), content)
@@ -320,50 +314,25 @@ describe('prefillFromLegacy', () => {
     folder = undefined
   })
 
-  test('fills an empty database once, keeping the password', async () => {
-    const log = spyOn(console, 'log').mockImplementation(() => {})
-    try {
-      const db = openDatabase(':memory:')
-      await setAppPassword(db, { current: '', password: 'chacara-15' })
-      const dir = writeExport()
-
-      expect(prefillFromLegacy(db, dir)?.readings).toBe(3)
-      expect(log).toHaveBeenCalledTimes(1)
-      // From then on the files are left alone, even if still there.
-      expect(prefillFromLegacy(db, dir)).toBeNull()
-      expect(db.select().from(owners).all()).toHaveLength(2)
-      expect(db.select().from(readings).all()).toHaveLength(3)
-      expect(db.select().from(appPassword).all()).toHaveLength(1)
-    } finally {
-      log.mockRestore()
-    }
-  })
-
-  test('leaves a database with data typed in alone', () => {
-    const db = openDatabase(':memory:')
-    createOwner(db, {
-      name: 'Dona Exemplo',
-      document: '',
-      phone: '',
-      email: '',
-      notes: '',
+  test('reads the three CSVs of a folder', () => {
+    const dir = writeExport({
+      'T_Usuarios.csv': USERS,
+      'T_Fatura.csv': INVOICES,
+      'T_Consumo.csv': CONSUMPTION,
     })
 
-    expect(prefillFromLegacy(db, '/pasta/que/nao/existe')).toBeNull()
-    expect(db.select().from(owners).all()).toHaveLength(1)
+    expect(readLegacyExport(dir)).toEqual(legacyExport())
   })
 
-  test('a missing file stops it before anything is written', () => {
-    const db = openDatabase(':memory:')
+  test('names the missing file', () => {
     const dir = writeExport({
       'T_Usuarios.csv': USERS,
       'T_Fatura.csv': INVOICES,
     })
 
-    expect(() => prefillFromLegacy(db, dir)).toThrow(
+    expect(() => readLegacyExport(dir)).toThrow(
       `Arquivo não encontrado: ${path.join(dir, 'T_Consumo.csv')}`,
     )
-    expect(db.select().from(owners).all()).toHaveLength(0)
   })
 })
 

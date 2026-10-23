@@ -6,9 +6,8 @@
  *   mdb-export Kw.mdb T_Fatura   > T_Fatura.csv
  *   mdb-export Kw.mdb T_Cosumo   > T_Consumo.csv
  *
- * Imported from a .zip in Configurações, with `bun run db:import-legacy`,
- * or when the app opens an empty database and LEGACY_DATA_PATH points at
- * the folder with these files.
+ * Imported from a .zip in Configurações or with `bun run db:import-legacy`;
+ * never on its own, so data wiped in Configurações stays wiped.
  */
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -259,14 +258,6 @@ export function readLegacyZip(bytes: Uint8Array): LegacyExport {
     }
     return file
   })
-}
-
-/** No owners and no chácaras yet (the password and settings don't count). */
-export function isEmptyDatabase(db: Executor): boolean {
-  return (
-    !db.select({ id: owners.id }).from(owners).limit(1).get() &&
-    !db.select({ id: properties.id }).from(properties).limit(1).get()
-  )
 }
 
 /** "Chácara  7" and "chacara 7" are the same chácara. */
@@ -632,7 +623,7 @@ export function importLegacy(
   return { created, matched, readings: imported, existing, skipped }
 }
 
-/** The import's outcome as printed by the script and the server log. */
+/** The import's outcome as printed by the script. */
 export function describeLegacyImport({
   created,
   matched,
@@ -653,19 +644,4 @@ export function describeLegacyImport({
     for (const line of skipped) lines.push(`  - ${line}`)
   }
   return lines.join('\n')
-}
-
-/**
- * LEGACY_DATA_PATH: a new server starts with the old app's history. Only an
- * empty database is filled, so once there is data (imported or typed in)
- * this does nothing, even with the files still there.
- */
-export function prefillFromLegacy(db: Executor, folder: string) {
-  if (!isEmptyDatabase(db)) return null
-  const result = importLegacy(db, readLegacyExport(folder))
-  console.log(
-    `Banco vazio preenchido com os dados do sistema antigo (${folder}).\n` +
-      describeLegacyImport(result),
-  )
-  return result
 }
