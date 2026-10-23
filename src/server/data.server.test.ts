@@ -3,8 +3,8 @@ import { openDatabase } from '#/db/client.server'
 import {
   appPassword,
   bankAccount,
-  monthRates,
   owners,
+  periods,
   properties,
   readings,
   sessions,
@@ -26,26 +26,35 @@ function fillIn(db: ReturnType<typeof openDatabase>) {
     .values({ name: 'Chácara 7', ownerId: owner.id })
     .returning()
     .get()
+  const months = db
+    .insert(periods)
+    .values([
+      {
+        startDate: '2025-12-10',
+        endDate: '2026-01-10',
+        energyBillCents: 4000,
+        reserveFundCents: 1500,
+      },
+      {
+        startDate: '2026-01-10',
+        endDate: '2026-02-10',
+        energyBillCents: 4000,
+        reserveFundCents: 1500,
+      },
+    ])
+    .returning()
+    .all()
   db.insert(readings)
     .values(
-      [1, 2].map((month) => ({
+      months.map((period, index) => ({
         propertyId: chacara.id,
-        year: 2026,
-        month,
-        previousReading: 100 * month,
-        currentReading: 100 * month + 50,
-        kwhPriceMicros: 850_000,
+        periodId: period.id,
+        previousReading: 100 * (index + 1),
+        currentReading: 100 * (index + 1) + 50,
+        energyCents: 4000,
         reserveFundCents: 1500,
       })),
     )
-    .run()
-  db.insert(monthRates)
-    .values({
-      year: 2026,
-      month: 2,
-      kwhPriceMicros: 850_000,
-      reserveFundCents: 1500,
-    })
     .run()
   db.insert(settings).values({ id: 1, groupName: 'Grupo Exemplo' }).run()
   db.insert(bankAccount).values({ id: 1, bankName: 'Banco Exemplo' }).run()
@@ -57,7 +66,7 @@ test('counts what the app has', () => {
     properties: 0,
     owners: 0,
     readings: 0,
-    months: 0,
+    periods: 0,
     settings: false,
     bank: false,
   })
@@ -66,7 +75,7 @@ test('counts what the app has', () => {
     properties: 1,
     owners: 2,
     readings: 2,
-    months: 1,
+    periods: 2,
     settings: true,
     bank: true,
   })
@@ -84,7 +93,7 @@ test('wiping deletes all the data but not the passwords or sessions', async () =
     properties: 0,
     owners: 0,
     readings: 0,
-    months: 0,
+    periods: 0,
     settings: false,
     bank: false,
   })
@@ -107,5 +116,14 @@ test('after wiping, new records are numbered from 1 again', () => {
     .values({ name: 'Chácara 9' })
     .returning()
     .get()
-  expect([owner.id, chacara.id]).toEqual([1, 1])
+  const period = db
+    .insert(periods)
+    .values({
+      startDate: '2026-01-10',
+      endDate: '2026-02-10',
+      reserveFundCents: 0,
+    })
+    .returning()
+    .get()
+  expect([owner.id, chacara.id, period.id]).toEqual([1, 1, 1])
 })

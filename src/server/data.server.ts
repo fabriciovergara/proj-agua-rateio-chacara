@@ -3,8 +3,8 @@ import type { SQLiteTable } from 'drizzle-orm/sqlite-core'
 import type { Executor } from '#/db/client.server'
 import {
   bankAccount,
-  monthRates,
   owners,
+  periods,
   properties,
   readings,
   settings,
@@ -19,8 +19,8 @@ export function dataSummary(db: Executor) {
     properties: rowsIn(db, properties),
     owners: rowsIn(db, owners),
     readings: rowsIn(db, readings),
-    /** Months with a kWh price and reserve fund. */
-    months: rowsIn(db, monthRates),
+    /** Billing periods, with their electricity bill and reserve fund. */
+    periods: rowsIn(db, periods),
     /** "Cobranças" and "Dados Bancários" were filled in. */
     settings: rowsIn(db, settings) > 0,
     bank: rowsIn(db, bankAccount) > 0,
@@ -31,19 +31,19 @@ export type DataSummary = ReturnType<typeof dataSummary>
 
 /**
  * Deletes all the data, all or nothing: chácaras, owners, readings, the
- * months' values, "Cobranças" and "Dados Bancários". The passwords stay and
+ * periods, "Cobranças" and "Dados Bancários". The passwords stay and
  * unlocked browsers stay unlocked. New records are numbered from 1 again.
  */
 export function deleteAllData(db: Executor) {
   db.transaction((tx) => {
     tx.delete(readings).run()
+    tx.delete(periods).run()
     tx.delete(properties).run()
     tx.delete(owners).run()
-    tx.delete(monthRates).run()
     tx.delete(settings).run()
     tx.delete(bankAccount).run()
     tx.run(
-      sql`DELETE FROM sqlite_sequence WHERE name IN ('owners', 'properties', 'readings')`,
+      sql`DELETE FROM sqlite_sequence WHERE name IN ('owners', 'properties', 'periods', 'readings')`,
     )
   })
 }

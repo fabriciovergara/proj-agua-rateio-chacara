@@ -1,8 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { openDatabase } from '#/db/client.server'
 import { getChartData } from './charts.server'
+import { createPeriod } from './periods.server'
 import { createProperty } from './properties.server'
-import { saveMonthReadings } from './readings.server'
+import { savePeriodSheet } from './readings.server'
+
+const MARCH = { startDate: '2026-02-10', endDate: '2026-03-10' }
 
 function setup(count: number) {
   const db = openDatabase(':memory:')
@@ -23,21 +26,24 @@ function setup(count: number) {
         notes: '',
       }).id,
   )
-  saveMonthReadings(
-    db,
-    {
-      year: 2026,
-      month: 3,
-      rates: { kwhPriceMicros: 500000, reserveFundCents: 1000 },
-      entries: ids.map((propertyId, index) => ({
-        propertyId,
-        previousReading: 0,
-        currentReading: (index + 1) * 10,
-      })),
+  const period = createPeriod(db, MARCH)
+  const consumption = ids.reduce((sum, _, index) => sum + (index + 1) * 10, 0)
+  // R$ 0,50 per m³.
+  savePeriodSheet(db, {
+    periodId: period.id,
+    period: {
+      ...MARCH,
+      energyBillCents: consumption * 50,
+      reserveFundCents: 1000,
     },
-    '2026-03-10',
-  )
-  return { db, ids }
+    entries: ids.map((propertyId, index) => ({
+      propertyId,
+      previousReading: 0,
+      currentReading: (index + 1) * 10,
+      ...MARCH,
+    })),
+  })
+  return { db, ids, period }
 }
 
 describe('getChartData', () => {
@@ -55,21 +61,25 @@ describe('getChartData', () => {
     const data = getChartData(db, { year: 2026 })
     expect(data.series).toHaveLength(8)
     expect(data.series.at(-1)).toEqual({ id: 0, name: 'Outras', slot: 7 })
-    const march = data.monthly.find((m) => m.month === 3)
-    // Chácaras 8, 9 and 10 used 80 + 90 + 100 kWh at R$ 0,50.
+    const [march] = data.byPeriod
+    // Chácaras 8, 9 and 10 used 80 + 90 + 100 m³ at R$ 0,50.
     expect(march?.energyBySeries[0]).toBe(270 * 50)
     expect(march?.energyCents).toBe(550 * 50)
   })
 
-  test('summarises the year', () => {
-    const { db } = setup(2)
+  test('summarises the periods of the year', () => {
+    const { db, period } = setup(2)
+    createPeriod(db, { startDate: '2025-11-10', endDate: '2025-12-10' })
     const data = getChartData(db, { year: 2026 })
-    expect(data.monthly).toHaveLength(12)
+    expect(data.byPeriod.map((p) => p.id)).toEqual([period.id])
     expect(data.totals).toMatchObject({
       consumption: 30,
       energyCents: 1500,
+      billCents: 1500,
       pendingCents: 1500 + 2000,
     })
     expect(data.byProperty.map((p) => p.consumption)).toEqual([20, 10])
+    // Without a year: the last 12 periods.
+    expect(getChartData(db, {}).byPeriod).toHaveLength(2)
   })
 })

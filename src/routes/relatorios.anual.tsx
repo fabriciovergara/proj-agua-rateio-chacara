@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { FilterSelect } from '#/components/filter-select'
 import { EmptyState } from '#/components/page'
 import { PropertyPlate } from '#/components/property-plate'
-import { formatAddress } from '#/components/reports/monthly-bill'
+import { formatAddress } from '#/components/reports/period-bill'
 import { StatusBadge } from '#/components/status-badge'
 import { Button } from '#/components/ui/button'
 import { Card } from '#/components/ui/card'
@@ -18,6 +18,7 @@ import {
   TableRow,
 } from '#/components/ui/table'
 import { formatBRL, formatNumber } from '#/lib/money'
+import { formatDateRange } from '#/lib/periods'
 import { getAnnualReport, getReportOptions } from '#/server/reports.functions'
 import type { AnnualReport } from '#/server/reports.server'
 
@@ -29,7 +30,7 @@ export const Route = createFileRoute('/relatorios/anual')({
   loaderDeps: ({ search }) => search,
   loader: async ({ deps }) => {
     const options = await getReportOptions()
-    const year = deps.ano ?? options.defaultPeriod.year
+    const year = deps.ano ?? options.defaultYear
     const report = deps.proprietario
       ? await getAnnualReport({ data: { ownerId: deps.proprietario, year } })
       : null
@@ -90,8 +91,8 @@ function AnnualReportPage() {
 
       {!proprietario ? (
         <EmptyState title="Escolha o proprietário">
-          O relatório mostra, mês a mês, o consumo de cada chácara do
-          proprietário, o valor e se já foi pago.
+          O relatório mostra, período a período, o consumo de água de cada
+          chácara do proprietário, o valor e se já foi pago.
         </EmptyState>
       ) : !report ? (
         <EmptyState title="Proprietário não encontrado">
@@ -141,7 +142,7 @@ function AnnualDocument({ report }: { report: AnnualReport }) {
           </Link>
         </p>
       ) : (
-        chacaras.map(({ property, months, totals: subtotal }) => (
+        chacaras.map(({ property, rows, totals: subtotal }) => (
           <section key={property.id} className="flex flex-col gap-3">
             <div className="flex items-start gap-3">
               <PropertyPlate name={property.name} />
@@ -161,18 +162,27 @@ function AnnualDocument({ report }: { report: AnnualReport }) {
             <Table className="text-[0.95rem]">
               <TableHeader>
                 <TableRow>
-                  <TableHead>Mês</TableHead>
-                  <TableHead className="text-right">Leitura anterior</TableHead>
+                  <TableHead>Período</TableHead>
+                  <TableHead className="text-right">Última leitura</TableHead>
                   <TableHead className="text-right">Leitura atual</TableHead>
-                  <TableHead className="text-right">Consumo (kWh)</TableHead>
+                  <TableHead className="text-right">Consumo (m³)</TableHead>
                   <TableHead className="text-right">Valor</TableHead>
                   <TableHead>Situação</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {months.map(({ month, name, reading }) => (
-                  <TableRow key={month}>
-                    <TableCell>{name}</TableCell>
+                {rows.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={6} className="text-muted-foreground">
+                      Nenhum período terminou em {report.year}.
+                    </TableCell>
+                  </TableRow>
+                )}
+                {rows.map(({ period, reading }) => (
+                  <TableRow key={period.id}>
+                    <TableCell className="tabular-nums">
+                      {formatDateRange(reading ?? period)}
+                    </TableCell>
                     {reading ? (
                       <>
                         <TableCell className="text-right tabular-nums">
@@ -185,7 +195,9 @@ function AnnualDocument({ report }: { report: AnnualReport }) {
                           {formatNumber(reading.bill.consumption)}
                         </TableCell>
                         <TableCell className="text-right font-semibold tabular-nums">
-                          {formatBRL(reading.bill.totalCents)}
+                          {reading.bill.totalCents === null
+                            ? 'Aguardando conta'
+                            : formatBRL(reading.bill.totalCents)}
                         </TableCell>
                         <TableCell>
                           <StatusBadge paid={reading.paid} />

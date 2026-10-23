@@ -1,14 +1,11 @@
-import { and, eq, inArray } from 'drizzle-orm'
+import { asc, eq } from 'drizzle-orm'
 import type { Executor } from '#/db/client.server'
-import { owners, properties, readings } from '#/db/schema'
-import {
-  dueDateFor,
-  formatPeriodShort,
-  MONTH_NAMES,
-  type Period,
-} from '#/lib/periods'
+import { owners, periods, properties, readings } from '#/db/schema'
+import { consumptionOf } from '#/lib/billing'
+import { dueDateFor, formatMonthYear, yearOf } from '#/lib/periods'
 import { tryBuildPixPayload } from '#/lib/pix'
-import { withBill } from './readings.server'
+import { getPeriod } from './periods.server'
+import { presentReadings } from './readings.server'
 import { getBankAccount, getSettings } from './settings.server'
 
 const byName = new Intl.Collator('pt-BR', {
@@ -16,12 +13,16 @@ const byName = new Intl.Collator('pt-BR', {
   sensitivity: 'base',
 })
 
-/** "Relatório mensal": one bill per chácara, with payment details and Pix. */
-export function getMonthlyBills(
+/**
+ * "Cobranças do período": one bill per chácara, with how the electricity
+ * bill was split, the payment details and Pix.
+ */
+export function getPeriodBills(
   db: Executor,
-  options: { period: Period; propertyId?: number },
+  options: { periodId: number; propertyId?: number },
 ) {
-  const { period, propertyId } = options
+  const period = getPeriod(db, options.periodId)
+  if (!period) return null
   const defaults = getSettings(db)
   const bank = getBankAccount(db)
   const pixKey = bank?.pixKey
@@ -29,51 +30,66 @@ export function getMonthlyBills(
   const holderName = bank?.holderName
   const holderCity = bank?.holderCity
 
-  const rows = db
-    .select({ reading: readings, property: properties, owner: owners })
+  const inPeriod = db
+    .select({ property: properties, owner: owners, readingId: readings.id })
     .from(readings)
     .innerJoin(properties, eq(properties.id, readings.propertyId))
     .leftJoin(owners, eq(owners.id, properties.ownerId))
-    .where(
-      and(
-        eq(readings.year, period.year),
-        eq(readings.month, period.month),
-        propertyId ? eq(readings.propertyId, propertyId) : undefined,
-      ),
-    )
+    .where(eq(readings.periodId, period.id))
     .all()
-    .sort((a, b) => byName.compare(a.property.name, b.property.name))
-
-  const bills = rows.map(({ reading, property, owner }) => {
-    const priced = withBill(reading)
-    const canPay =
-      !priced.paid &&
-      priced.bill.totalCents > 0 &&
-      pixKey &&
-      pixKeyType &&
-      holderName &&
-      holderCity
-    return {
-      reading: priced,
-      property,
-      owner,
-      pixPayload: canPay
-        ? tryBuildPixPayload({
-            key: pixKey,
-            keyType: pixKeyType,
-            name: holderName,
-            city: holderCity,
-            amountCents: priced.bill.totalCents,
-            description: `${property.name} ${formatPeriodShort(period)}`,
-          })
-        : null,
-    }
+  const views = presentReadings(
+    db,
+    inPeriod.map(({ property }) => property.id),
+  )
+  const all = inPeriod.flatMap(({ property, owner, readingId }) => {
+    const reading = views.get(readingId)
+    return reading ? [{ reading, property, owner }] : []
   })
+
+  const bills = all
+    .filter(
+      ({ property }) =>
+        !options.propertyId || property.id === options.propertyId,
+    )
+    .sort((a, b) => byName.compare(a.property.name, b.property.name))
+    .map(({ reading, property, owner }) => {
+      const amount = reading.bill.totalCents
+      const canPay =
+        !reading.paid &&
+        amount !== null &&
+        amount > 0 &&
+        pixKey &&
+        pixKeyType &&
+        holderName &&
+        holderCity
+      return {
+        reading,
+        property,
+        owner,
+        pixPayload: canPay
+          ? tryBuildPixPayload({
+              key: pixKey,
+              keyType: pixKeyType,
+              name: holderName,
+              city: holderCity,
+              amountCents: amount,
+              description: `${property.name} ${formatMonthYear(period.endDate)}`,
+            })
+          : null,
+      }
+    })
 
   return {
     period,
+    /** Water used by every chácara read in the period: the split's base. */
+    consumption: all.reduce(
+      (sum, { reading }) => sum + reading.bill.consumption,
+      0,
+    ),
     groupName: defaults?.groupName ?? null,
-    dueDate: defaults?.dueDay ? dueDateFor(period, defaults.dueDay) : null,
+    dueDate: defaults?.dueDay
+      ? dueDateFor(period.endDate, defaults.dueDay)
+      : null,
     bank,
     /** True when the bank details lack what a Pix QR code needs. */
     pixMissing: !(pixKey && pixKeyType && holderName && holderCity),
@@ -81,9 +97,9 @@ export function getMonthlyBills(
   }
 }
 
-export type MonthlyBills = ReturnType<typeof getMonthlyBills>
+export type PeriodBills = NonNullable<ReturnType<typeof getPeriodBills>>
 
-/** "Relatório anual": the 12 months of one owner's chácaras. */
+/** "Relatório anual": the periods ending in a year, for one owner's chácaras. */
 export function getAnnualReport(
   db: Executor,
   options: { ownerId: number; year: number },
@@ -101,23 +117,18 @@ export function getAnnualReport(
     .where(eq(properties.ownerId, owner.id))
     .all()
     .sort((a, b) => byName.compare(a.name, b.name))
-
-  const yearReadings = owned.length
-    ? db
-        .select()
-        .from(readings)
-        .where(
-          and(
-            inArray(
-              readings.propertyId,
-              owned.map((property) => property.id),
-            ),
-            eq(readings.year, options.year),
-          ),
-        )
-        .all()
-        .map(withBill)
-    : []
+  const yearPeriods = db
+    .select()
+    .from(periods)
+    .orderBy(asc(periods.startDate))
+    .all()
+    .filter((period) => yearOf(period.endDate) === options.year)
+  const views = [
+    ...presentReadings(
+      db,
+      owned.map((property) => property.id),
+    ).values(),
+  ]
 
   const emptyTotals = () => ({
     consumption: 0,
@@ -129,22 +140,23 @@ export function getAnnualReport(
 
   const chacaras = owned.map((property) => {
     const totals = emptyTotals()
-    const months = MONTH_NAMES.map((name, index) => {
+    const rows = yearPeriods.map((period) => {
       const reading =
-        yearReadings.find(
-          (r) => r.propertyId === property.id && r.month === index + 1,
+        views.find(
+          (r) => r.propertyId === property.id && r.periodId === period.id,
         ) ?? null
       if (reading) {
+        const amount = reading.bill.totalCents ?? 0
         for (const target of [totals, grandTotals]) {
-          target.consumption += reading.bill.consumption
-          target.totalCents += reading.bill.totalCents
-          if (reading.paid) target.paidCents += reading.bill.totalCents
-          else target.pendingCents += reading.bill.totalCents
+          target.consumption += consumptionOf(reading)
+          target.totalCents += amount
+          if (reading.paid) target.paidCents += amount
+          else target.pendingCents += amount
         }
       }
-      return { month: index + 1, name, reading }
+      return { period, reading }
     })
-    return { property, months, totals }
+    return { property, rows, totals }
   })
 
   const defaults = getSettings(db)

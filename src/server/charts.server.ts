@@ -1,32 +1,25 @@
-import { and, asc, eq, gte, lte, sql } from 'drizzle-orm'
+import { asc } from 'drizzle-orm'
 import type { Executor } from '#/db/client.server'
-import { properties, readings } from '#/db/schema'
-import {
-  addMonths,
-  currentPeriod,
-  formatPeriodShort,
-  type Period,
-  periodKey,
-} from '#/lib/periods'
-import { withBill } from './readings.server'
+import { periods, properties } from '#/db/schema'
+import { yearOf } from '#/lib/periods'
+import { presentReadings } from './readings.server'
 
 /** Charts use at most 8 colours; extra chácaras are grouped as "Outras". */
 export const MAX_SERIES = 8
 export const OTHERS_ID = 0
 
-const periodIndex = sql<number>`${readings.year} * 12 + ${readings.month}`
-const indexOf = (period: Period) => period.year * 12 + period.month
-
 export interface ChartFilters {
-  /** A calendar year, or the last 12 months when absent. */
+  /** The periods ending in a year, or the last 12 periods when absent. */
   year?: number
   propertyId?: number
 }
 
 export function getChartData(db: Executor, filters: ChartFilters) {
-  const end = filters.year ? { year: filters.year, month: 12 } : currentPeriod()
-  const periods = Array.from({ length: 12 }, (_, i) => addMonths(end, i - 11))
-  const [first] = periods
+  const all = db.select().from(periods).orderBy(asc(periods.startDate)).all()
+  const chosen = filters.year
+    ? all.filter((period) => yearOf(period.endDate) === filters.year)
+    : all.slice(-12)
+  const chosenIds = new Set(chosen.map((period) => period.id))
 
   // Colours follow the chácara (creation order), never its ranking.
   const allProperties = db
@@ -54,58 +47,42 @@ export function getChartData(db: Executor, filters: ChartFilters) {
   const seriesIdOf = (propertyId: number) =>
     series.some((s) => s.id === propertyId) ? propertyId : OTHERS_ID
 
-  const rows = db
-    .select()
-    .from(readings)
-    .where(
-      and(
-        gte(periodIndex, indexOf(first ?? end)),
-        lte(periodIndex, indexOf(end)),
-        filters.propertyId
-          ? eq(readings.propertyId, filters.propertyId)
-          : undefined,
-      ),
-    )
-    .all()
-    .map(withBill)
+  const rows = [
+    ...presentReadings(
+      db,
+      filters.propertyId ? [filters.propertyId] : undefined,
+    ).values(),
+  ].filter((reading) => chosenIds.has(reading.periodId))
 
-  const monthly = periods.map((period) => {
-    const inMonth = rows.filter(
-      (r) => r.year === period.year && r.month === period.month,
-    )
+  const byPeriod = chosen.map((period) => {
+    const inPeriod = rows.filter((r) => r.periodId === period.id)
     const energyBySeries: Record<string, number> = {}
     for (const s of series) energyBySeries[s.id] = 0
     let paidCents = 0
     let pendingCents = 0
     let consumption = 0
     let energyCents = 0
-    for (const r of inMonth) {
+    for (const r of inPeriod) {
       const id = seriesIdOf(r.propertyId)
-      energyBySeries[id] = (energyBySeries[id] ?? 0) + r.bill.energyCents
-      energyCents += r.bill.energyCents
+      const energy = r.bill.energyCents ?? 0
+      energyBySeries[id] = (energyBySeries[id] ?? 0) + energy
+      energyCents += energy
       consumption += r.bill.consumption
-      if (r.paid) paidCents += r.bill.totalCents
-      else pendingCents += r.bill.totalCents
+      if (r.paid) paidCents += r.bill.totalCents ?? 0
+      else pendingCents += r.bill.totalCents ?? 0
     }
-    // The price most readings of the month were billed with.
-    const prices = new Map<number, number>()
-    for (const r of inMonth) {
-      prices.set(r.kwhPriceMicros, (prices.get(r.kwhPriceMicros) ?? 0) + 1)
-    }
-    const kwhPriceMicros =
-      [...prices.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null
-
     return {
-      key: periodKey(period),
-      label: formatPeriodShort(period),
-      ...period,
-      readings: inMonth.length,
+      id: period.id,
+      startDate: period.startDate,
+      endDate: period.endDate,
+      /** The pump's electricity bill (null until it is typed in). */
+      billCents: period.energyBillCents,
+      readings: inPeriod.length,
       energyBySeries,
       energyCents,
       consumption,
       paidCents,
       pendingCents,
-      kwhPriceMicros,
     }
   })
 
@@ -116,7 +93,7 @@ export function getChartData(db: Executor, filters: ChartFilters) {
         id: property.id,
         name: property.name,
         consumption: own.reduce((sum, r) => sum + r.bill.consumption, 0),
-        energyCents: own.reduce((sum, r) => sum + r.bill.energyCents, 0),
+        energyCents: own.reduce((sum, r) => sum + (r.bill.energyCents ?? 0), 0),
         readings: own.length,
       }
     })
@@ -125,14 +102,15 @@ export function getChartData(db: Executor, filters: ChartFilters) {
 
   const totals = rows.reduce(
     (acc, r) => {
+      const amount = r.bill.totalCents ?? 0
       acc.consumption += r.bill.consumption
-      acc.energyCents += r.bill.energyCents
-      acc.totalCents += r.bill.totalCents
+      acc.energyCents += r.bill.energyCents ?? 0
+      acc.totalCents += amount
       if (r.paid) {
-        acc.paidCents += r.bill.totalCents
+        acc.paidCents += amount
         acc.reserveFundPaidCents += r.bill.reserveFundCents
       } else {
-        acc.pendingCents += r.bill.totalCents
+        acc.pendingCents += amount
       }
       return acc
     },
@@ -147,11 +125,14 @@ export function getChartData(db: Executor, filters: ChartFilters) {
   )
 
   return {
-    periods,
     series,
-    monthly,
+    byPeriod,
     byProperty,
-    totals,
+    totals: {
+      ...totals,
+      /** The electricity bills of the periods shown. */
+      billCents: chosen.reduce((sum, p) => sum + (p.energyBillCents ?? 0), 0),
+    },
     readingsCount: rows.length,
   }
 }

@@ -3,10 +3,9 @@ import {
   centsToInput,
   centsToPixAmount,
   formatBRL,
-  formatKwhPrice,
-  microsToInput,
+  formatUnitPrice,
   parseCents,
-  parsePriceMicros,
+  parseScaledDecimal,
 } from './money'
 
 const nbsp = ' '
@@ -18,16 +17,14 @@ describe('formatting', () => {
     expect(formatBRL(0)).toBe(`R$${nbsp}0,00`)
   })
 
-  test('formats the kWh price with 2 to 4 decimals', () => {
-    expect(formatKwhPrice(350000)).toBe(`R$${nbsp}0,35`)
-    expect(formatKwhPrice(874300)).toBe(`R$${nbsp}0,8743`)
+  test('formats the price of a m³ with 2 to 4 decimals', () => {
+    expect(formatUnitPrice(350000)).toBe(`R$${nbsp}0,35`)
+    expect(formatUnitPrice(4852900)).toBe(`R$${nbsp}4,8529`)
   })
 
   test('pre-fills inputs in the Brazilian format', () => {
     expect(centsToInput(123456)).toBe('1.234,56')
     expect(centsToInput(null)).toBe('')
-    expect(microsToInput(350000)).toBe('0,35')
-    expect(microsToInput(874300)).toBe('0,8743')
   })
 
   test('formats Pix amounts with a dot and two decimals', () => {
@@ -58,18 +55,15 @@ describe('parseCents', () => {
   })
 })
 
-describe('parsePriceMicros', () => {
+describe('parseScaledDecimal', () => {
   test.each([
-    ['0,35', 350000],
-    ['0.35', 350000],
-    ['0,8743', 874300],
-    ['0,87435', 874400],
-    ['1', 1000000],
-    ['R$ 0,6', 600000],
-    // A dot with 3 decimals is a price, not a thousands separator.
-    ['1.234', 1234000],
-    ['1,234', 1234000],
-  ])('%p → %p', (input, expected) => {
-    expect(parsePriceMicros(input)).toBe(expected)
+    ['0,35', 3500],
+    ['0,87435', 8744],
+    ['1', 10000],
+    // With more than 2 decimals, a dot and 3 digits is not a thousands separator.
+    ['1.234', 12340],
+    ['1,234', 12340],
+  ])('%p with 4 decimals → %p', (input, expected) => {
+    expect(parseScaledDecimal(input, 4)).toBe(expected)
   })
 })

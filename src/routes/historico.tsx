@@ -17,9 +17,9 @@ import {
   TableHeader,
   TableRow,
 } from '#/components/ui/table'
-import { centsToCsv, downloadCsv, microsToCsv, toCsv } from '#/lib/csv'
+import { centsToCsv, downloadCsv, toCsv } from '#/lib/csv'
 import { formatBRL, formatNumber } from '#/lib/money'
-import { formatDate, formatPeriodShort, MONTH_NAMES } from '#/lib/periods'
+import { formatDate, formatDateRangeShort } from '#/lib/periods'
 import { getHistory } from '#/server/readings.functions'
 import { getReportOptions } from '#/server/reports.functions'
 
@@ -53,32 +53,34 @@ type HistoryRow = Awaited<ReturnType<typeof getHistory>>['rows'][number]
 
 function exportCsv(rows: HistoryRow[]) {
   const header = [
-    'Ano',
-    'Mês',
+    'Início',
+    'Fim',
     'Chácara',
     'Proprietário',
-    'Leitura anterior',
+    'Última leitura',
     'Leitura atual',
-    'Consumo (kWh)',
-    'Preço kWh (R$)',
-    'Custo energia (R$)',
+    'Consumo (m³)',
+    'Conta de energia do período (R$)',
+    'Energia (R$)',
     'Fundo reserva (R$)',
     'Total (R$)',
     'Situação',
     'Pago em',
   ]
+  const money = (cents: number | null) =>
+    cents === null ? '' : centsToCsv(cents)
   const body = rows.map((row) => [
-    row.year,
-    MONTH_NAMES[row.month - 1],
+    formatDate(row.startDate),
+    formatDate(row.endDate),
     row.property.name,
     row.owner?.name,
     row.previousReading,
     row.currentReading,
     row.bill.consumption,
-    microsToCsv(row.kwhPriceMicros),
-    centsToCsv(row.bill.energyCents),
+    money(row.period.energyBillCents),
+    money(row.bill.energyCents),
     centsToCsv(row.bill.reserveFundCents),
-    centsToCsv(row.bill.totalCents),
+    money(row.bill.totalCents),
     row.paid ? 'Pago' : 'Pendente',
     formatDate(row.paidAt),
   ])
@@ -94,10 +96,11 @@ function HistoryPage() {
 
   const totals = rows.reduce(
     (acc, row) => {
+      const amount = row.bill.totalCents ?? 0
       acc.consumption += row.bill.consumption
-      acc.totalCents += row.bill.totalCents
-      if (row.paid) acc.paidCents += row.bill.totalCents
-      else acc.pendingCents += row.bill.totalCents
+      acc.totalCents += amount
+      if (row.paid) acc.paidCents += amount
+      else acc.pendingCents += amount
       return acc
     },
     { consumption: 0, totalCents: 0, paidCents: 0, pendingCents: 0 },
@@ -112,7 +115,7 @@ function HistoryPage() {
     <div className="flex flex-col gap-8">
       <PageHeader
         title="Histórico"
-        description="Todas as leituras e pagamentos. Use os filtros para encontrar um mês, uma chácara ou o que ainda falta receber."
+        description="Todas as leituras e pagamentos. Use os filtros para encontrar um ano, uma chácara ou o que ainda falta receber."
         actions={
           <Button
             variant="outline"
@@ -180,7 +183,7 @@ function HistoryPage() {
             <strong className="tabular-nums">
               {formatBRL(totals.totalCents)}
             </strong>{' '}
-            ({formatNumber(totals.consumption)} kWh).{' '}
+            ({formatNumber(totals.consumption)} m³ de água).{' '}
             <span className="text-paid">
               Pago:{' '}
               <strong className="tabular-nums">
@@ -199,10 +202,10 @@ function HistoryPage() {
             <Table>
               <TableHeader className="bg-muted/50">
                 <TableRow>
-                  <TableHead>Mês</TableHead>
+                  <TableHead>Período</TableHead>
                   <TableHead>Chácara</TableHead>
                   <TableHead>Proprietário</TableHead>
-                  <TableHead className="text-right">Consumo (kWh)</TableHead>
+                  <TableHead className="text-right">Consumo (m³)</TableHead>
                   <TableHead className="text-right">Total</TableHead>
                   <TableHead>Situação</TableHead>
                   <TableHead>
@@ -214,7 +217,7 @@ function HistoryPage() {
                 {rows.slice(0, limit).map((row) => (
                   <TableRow key={row.id}>
                     <TableCell className="tabular-nums">
-                      {formatPeriodShort(row)}
+                      {formatDateRangeShort(row)}
                     </TableCell>
                     <TableCell>
                       <Link
@@ -231,20 +234,27 @@ function HistoryPage() {
                       {formatNumber(row.bill.consumption)}
                     </TableCell>
                     <TableCell className="text-right font-semibold tabular-nums">
-                      {formatBRL(row.bill.totalCents)}
+                      {row.bill.totalCents === null ? (
+                        <span className="font-normal text-muted-foreground">
+                          Aguardando conta
+                        </span>
+                      ) : (
+                        formatBRL(row.bill.totalCents)
+                      )}
                     </TableCell>
                     <TableCell>
                       <StatusBadge paid={row.paid} paidAt={row.paidAt} />
                     </TableCell>
                     <TableCell>
                       <div className="flex gap-1">
-                        <PaidToggle readingId={row.id} paid={row.paid} />
+                        {row.bill.totalCents !== null && (
+                          <PaidToggle readingId={row.id} paid={row.paid} />
+                        )}
                         <Button variant="ghost" size="sm" asChild>
                           <Link
-                            to="/relatorios/mensal"
+                            to="/relatorios/periodo"
                             search={{
-                              ano: row.year,
-                              mes: row.month,
+                              periodo: row.periodId,
                               chacara: row.property.id,
                             }}
                           >

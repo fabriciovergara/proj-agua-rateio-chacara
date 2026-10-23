@@ -1,18 +1,88 @@
 import { describe, expect, test } from 'bun:test'
 import {
-  computeBill,
+  billOf,
   isUnusualConsumption,
-  priceFromElectricityBill,
+  pricePerCubicMeter,
+  splitEnergyBill,
 } from './billing'
 
-describe('computeBill', () => {
-  test('matches the original Access app (Feb 2007)', () => {
-    // 461 − 366 = 95 kWh × R$ 0,34 = R$ 32,30 + R$ 10,00 fund
+describe('splitEnergyBill', () => {
+  test('divides the bill by each consumption', () => {
+    // R$ 300,00 for 10 + 20 + 30 m³: R$ 5,00 per m³.
+    const shares = splitEnergyBill(30_000, [
+      { key: 1, consumption: 10 },
+      { key: 2, consumption: 20 },
+      { key: 3, consumption: 30 },
+    ])
+    expect([...shares]).toEqual([
+      [1, 5000],
+      [2, 10_000],
+      [3, 15_000],
+    ])
+  })
+
+  test('the shares always add up to the bill', () => {
+    // R$ 100,00 for 3 equal consumptions: 33,33 + 33,33 + 33,34.
+    const equal = splitEnergyBill(10_000, [
+      { key: 1, consumption: 7 },
+      { key: 2, consumption: 7 },
+      { key: 3, consumption: 7 },
+    ])
+    expect([...equal.values()]).toEqual([3334, 3333, 3333])
+
+    const items = [13, 29, 7, 101, 55].map((consumption, key) => ({
+      key,
+      consumption,
+    }))
+    const shares = splitEnergyBill(41_250, items)
+    expect([...shares.values()].reduce((sum, share) => sum + share, 0)).toBe(
+      41_250,
+    )
+  })
+
+  test('the leftover centavos go to the largest remainders', () => {
+    // R$ 10,00 for 1 + 2 m³: 3,333… and 6,666… → 3,33 and 6,67.
+    const shares = splitEnergyBill(1000, [
+      { key: 'a', consumption: 1 },
+      { key: 'b', consumption: 2 },
+    ])
+    expect(shares.get('a')).toBe(333)
+    expect(shares.get('b')).toBe(667)
+  })
+
+  test('nobody pays energy when no water was used', () => {
+    const shares = splitEnergyBill(5000, [
+      { key: 1, consumption: 0 },
+      { key: 2, consumption: 0 },
+    ])
+    expect([...shares.values()]).toEqual([0, 0])
+  })
+
+  test('a chácara that used nothing pays no energy', () => {
+    const shares = splitEnergyBill(5000, [
+      { key: 1, consumption: 0 },
+      { key: 2, consumption: 12 },
+    ])
+    expect(shares.get(1)).toBe(0)
+    expect(shares.get(2)).toBe(5000)
+  })
+
+  test('works with huge meters without losing centavos', () => {
+    const shares = splitEnergyBill(9_999_999, [
+      { key: 1, consumption: 999_999_999 },
+      { key: 2, consumption: 1 },
+    ])
+    expect((shares.get(1) ?? 0) + (shares.get(2) ?? 0)).toBe(9_999_999)
+  })
+})
+
+describe('billOf', () => {
+  test('adds the reserve fund to the energy share', () => {
     expect(
-      computeBill({
+      billOf({
         previousReading: 366,
         currentReading: 461,
-        kwhPriceMicros: 340000,
+        energyCents: 3230,
         reserveFundCents: 1000,
       }),
     ).toEqual({
@@ -23,45 +93,28 @@ describe('computeBill', () => {
     })
   })
 
-  test('still charges the reserve fund when nothing was used', () => {
-    const bill = computeBill({
-      previousReading: 162,
-      currentReading: 162,
-      kwhPriceMicros: 350000,
+  test('has no total until the electricity bill is known', () => {
+    expect(
+      billOf({
+        previousReading: 10,
+        currentReading: 25,
+        energyCents: null,
+        reserveFundCents: 1000,
+      }),
+    ).toEqual({
+      consumption: 15,
+      energyCents: null,
       reserveFundCents: 1000,
+      totalCents: null,
     })
-    expect(bill.energyCents).toBe(0)
-    expect(bill.totalCents).toBe(1000)
-  })
-
-  test('rounds the energy cost half up to the centavo', () => {
-    // 1 kWh × R$ 0,8745 = R$ 0,8745 → R$ 0,87; 3 kWh → 2,6235 → 2,62
-    const base = { previousReading: 0, reserveFundCents: 0 }
-    expect(
-      computeBill({ ...base, currentReading: 1, kwhPriceMicros: 874500 })
-        .energyCents,
-    ).toBe(87)
-    // 1 kWh × R$ 0,875 = 87,5 centavos → 88
-    expect(
-      computeBill({ ...base, currentReading: 1, kwhPriceMicros: 875000 })
-        .energyCents,
-    ).toBe(88)
-    expect(
-      computeBill({ ...base, currentReading: 3, kwhPriceMicros: 874500 })
-        .energyCents,
-    ).toBe(262)
   })
 })
 
-describe('priceFromElectricityBill', () => {
-  test('divides the bill total by the kWh on the bill', () => {
-    // R$ 412,50 for 480 kWh = R$ 0,859375 → 0,8594
-    expect(priceFromElectricityBill(41250, 480)).toBe(859400)
-  })
-
-  test('returns null when the bill is incomplete', () => {
-    expect(priceFromElectricityBill(41250, 0)).toBeNull()
-    expect(priceFromElectricityBill(0, 100)).toBeNull()
+describe('pricePerCubicMeter', () => {
+  test('divides the bill by the m³ used', () => {
+    // R$ 412,50 for 85 m³ = R$ 4,852941… per m³.
+    expect(pricePerCubicMeter(41_250, 85)).toBe(4_852_941)
+    expect(pricePerCubicMeter(41_250, 0)).toBeNull()
   })
 })
 

@@ -142,8 +142,8 @@ function BillingSection({ settings }: { settings: Settings['settings'] }) {
         <CardHeader>
           <CardTitle className="text-2xl">Cobranças</CardTitle>
           <CardDescription className="text-base">
-            O que aparece em todas as cobranças. O preço do kWh e o fundo de
-            reserva de cada mês ficam na tela{' '}
+            O que aparece em todas as cobranças. A conta de energia e o fundo de
+            reserva de cada período ficam na tela{' '}
             <Link to="/" className="font-semibold text-primary underline">
               Leituras
             </Link>
@@ -160,7 +160,7 @@ function BillingSection({ settings }: { settings: Settings['settings'] }) {
             />
             <SelectField
               label="Dia do vencimento"
-              description="As cobranças vencem neste dia do mês seguinte à leitura."
+              description="As cobranças vencem neste dia do mês seguinte ao fim do período."
               value={values.dueDay}
               onChange={set('dueDay')}
               placeholder="Sem vencimento"
@@ -639,8 +639,8 @@ const listOf = (items: string[]) =>
     ? `${items.slice(0, -1).join(', ')} e ${items.at(-1)}`
     : (items[0] ?? '')
 
-const monthValues = (months: number) =>
-  `o preço do kWh e o fundo de reserva de ${count(months, 'mês', 'meses')}`
+const periodValues = (periods: number) =>
+  `${count(periods, 'período', 'períodos')}, com a conta de energia e o fundo de reserva`
 
 type Imported = Awaited<ReturnType<typeof importData>>
 
@@ -730,7 +730,7 @@ function ImportSection() {
 function backupExtras(result: Imported): string[] {
   if (result.from !== 'backup') return []
   return [
-    result.months > 0 && monthValues(result.months),
+    result.periods > 0 && periodValues(result.periods),
     result.settings && 'os dados das cobranças',
     result.bank && 'os dados bancários',
   ].filter((item) => typeof item === 'string')
@@ -802,7 +802,7 @@ function whatWouldBeDeleted(summary: DataSummary): string[] {
     records.length > 0 && listOf(records),
     summary.readings > 0 &&
       `${count(summary.readings, 'leitura', 'leituras')}, com os pagamentos`,
-    summary.months > 0 && monthValues(summary.months),
+    summary.periods > 0 && periodValues(summary.periods),
     summary.settings && 'os dados das cobranças',
     summary.bank && 'os dados bancários',
   ].filter((item) => typeof item === 'string')
@@ -817,8 +817,8 @@ function WipeSection({ summary }: { summary: DataSummary }) {
         <CardTitle className="text-2xl">Apagar todos os dados</CardTitle>
         <CardDescription className="text-base">
           Para começar do zero: apaga as chácaras, os proprietários, as leituras
-          e os pagamentos, os valores de cada mês, os dados das cobranças e os
-          dados bancários. As senhas não mudam.
+          e os pagamentos, os períodos, os dados das cobranças e os dados
+          bancários. As senhas não mudam.
         </CardDescription>
       </CardHeader>
       <CardFooter className="flex flex-wrap items-center gap-x-4 gap-y-3">

@@ -3,9 +3,12 @@ import { FileText, Pencil, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { z } from 'zod'
 import { ConfirmDialog } from '#/components/confirm-dialog'
+import { Notice } from '#/components/page'
 import { PropertyPlate } from '#/components/property-plate'
 import {
+  type Before,
   NewReadingForm,
+  type OpenPeriod,
   ReadingEditorRow,
   type ReadingValues,
   toDraft,
@@ -24,8 +27,8 @@ import {
   TableHeader,
   TableRow,
 } from '#/components/ui/table'
-import { formatBRL, formatKwhPrice, formatNumber } from '#/lib/money'
-import { comparePeriods, formatPeriod, MONTH_NAMES } from '#/lib/periods'
+import { formatBRL, formatNumber } from '#/lib/money'
+import { type DateRange, formatDateRange, yearOf } from '#/lib/periods'
 import { parseId } from '#/lib/route-params'
 import { useAction } from '#/lib/use-action'
 import {
@@ -54,12 +57,26 @@ export const Route = createFileRoute('/chacaras/$id')({
 })
 
 type Sheet = Awaited<ReturnType<typeof getPropertySheet>>
+type Row = Sheet['readings'][number]
 
-function relinkMessage(relinked: { year: number; month: number } | null) {
-  return relinked
-    ? ` A leitura anterior de ${formatPeriod(relinked)} também foi atualizada.`
-    : ''
+function relinkMessage(relinked: DateRange[] | undefined) {
+  return (relinked ?? [])
+    .map(
+      (other) =>
+        ` A leitura de ${formatDateRange(other)} também foi corrigida.`,
+    )
+    .join('')
 }
+
+const beforeOf = (reading: Row | undefined): Before | null =>
+  reading
+    ? {
+        startDate: reading.startDate,
+        endDate: reading.endDate,
+        previousReading: reading.previousReading,
+        currentReading: reading.currentReading,
+      }
+    : null
 
 function PropertySheetPage() {
   const sheet = Route.useLoaderData()
@@ -67,8 +84,12 @@ function PropertySheetPage() {
   const navigate = Route.useNavigate()
   const { property, owner, readings } = sheet
 
-  const years = [...new Set(readings.map((r) => r.year))].sort((a, b) => b - a)
-  const visible = ano ? readings.filter((r) => r.year === ano) : readings
+  const years = [
+    ...new Set(readings.map((r) => yearOf(r.period.endDate))),
+  ].sort((a, b) => b - a)
+  const visible = ano
+    ? readings.filter((r) => yearOf(r.period.endDate) === ano)
+    : readings
 
   return (
     <div className="flex flex-col gap-8">
@@ -149,8 +170,9 @@ function PropertySheetPage() {
               Leituras
             </h2>
             <p className="text-muted-foreground">
-              A leitura anterior vem da linha de cima. Clique no lápis para
-              corrigir uma linha.
+              A última leitura de cada linha é a leitura atual da linha de cima:
+              corrigir uma corrige a outra. Clique no lápis para corrigir uma
+              linha.
             </p>
           </div>
           {years.length > 1 && (
@@ -190,48 +212,52 @@ function PropertySheetPage() {
   )
 }
 
-function ReadingsTable({
-  sheet,
-  rows,
-}: {
-  sheet: Sheet
-  rows: Sheet['readings']
-}) {
+function ReadingsTable({ sheet, rows }: { sheet: Sheet; rows: Row[] }) {
   const [editingId, setEditingId] = useState<number | null>(null)
   const create = useAction(createReading, {
     success: (result) =>
-      `Leitura adicionada.${relinkMessage(result?.relinked ?? null)}`,
+      `Leitura adicionada.${relinkMessage(result?.relinked)}`,
   })
   const update = useAction(updateReading, {
-    success: (result) =>
-      `Leitura corrigida.${relinkMessage(result?.relinked ?? null)}`,
+    success: (result) => `Leitura corrigida.${relinkMessage(result?.relinked)}`,
   })
-  const remove = useAction(deleteReading, { success: 'Leitura apagada.' })
+  const remove = useAction(deleteReading, {
+    success: 'Leitura apagada. A conta do período foi dividida de novo.',
+  })
   const propertyId = sheet.property.id
+  const all = sheet.readings
 
-  /** The reading right before `period` (readings come sorted by month). */
-  const expectedPrevious =
-    (excludeId?: number) => (period: { year: number; month: number }) => {
-      const before = sheet.readings
-        .filter((r) => r.id !== excludeId && comparePeriods(r, period) < 0)
-        .at(-1)
-      return before
-        ? { value: before.currentReading, label: formatPeriod(before) }
-        : null
-    }
+  /** Periods without a reading of this chácara, newest first. */
+  const taken = new Set(all.map((reading) => reading.periodId))
+  const open: OpenPeriod[] = sheet.periods
+    .filter((period) => !taken.has(period.id))
+    .map((period) => ({
+      ...period,
+      before: beforeOf(
+        all.filter((r) => r.period.startDate < period.startDate).at(-1),
+      ),
+    }))
+  // The period after the last reading, else the newest one still open.
+  const last = all.at(-1)
+  const nextOpen =
+    open
+      .filter((period) => !last || period.startDate > last.period.startDate)
+      .at(-1) ?? open[0]
 
   const totals = rows.reduce(
     (acc, r) => ({
       consumption: acc.consumption + r.bill.consumption,
-      energyCents: acc.energyCents + r.bill.energyCents,
+      energyCents: acc.energyCents + (r.bill.energyCents ?? 0),
       reserveFundCents: acc.reserveFundCents + r.bill.reserveFundCents,
-      totalCents: acc.totalCents + r.bill.totalCents,
+      totalCents: acc.totalCents + (r.bill.totalCents ?? 0),
     }),
     { consumption: 0, energyCents: 0, reserveFundCents: 0, totalCents: 0 },
   )
 
-  async function handleCreate(values: ReadingValues) {
-    const result = await create.run({ data: { propertyId, ...values } })
+  async function handleCreate(periodId: number, values: ReadingValues) {
+    const result = await create.run({
+      data: { propertyId, periodId, ...values },
+    })
     return Boolean(result)
   }
 
@@ -247,22 +273,18 @@ function ReadingsTable({
         <Table className="text-[0.95rem]">
           <TableHeader className="bg-muted/50">
             <TableRow>
-              <TableHead>Ano</TableHead>
-              <TableHead>Mês</TableHead>
+              <TableHead>Período</TableHead>
+              <TableHead className="text-right whitespace-normal">
+                Última leitura
+              </TableHead>
               <TableHead className="text-right whitespace-normal">
                 Leitura atual
               </TableHead>
               <TableHead className="text-right whitespace-normal">
-                Leitura anterior
+                Consumo (m³)
               </TableHead>
               <TableHead className="text-right whitespace-normal">
-                Consumo (kWh)
-              </TableHead>
-              <TableHead className="text-right whitespace-normal">
-                Preço kWh
-              </TableHead>
-              <TableHead className="text-right whitespace-normal">
-                Custo energia
+                Energia
               </TableHead>
               <TableHead className="text-right whitespace-normal">
                 Fundo reserva
@@ -277,47 +299,58 @@ function ReadingsTable({
           <TableBody>
             {rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={11} className="py-6 text-muted-foreground">
+                <TableCell colSpan={9} className="py-6 text-muted-foreground">
                   Nenhuma leitura ainda. Use o formulário abaixo para lançar a
                   primeira.
                 </TableCell>
               </TableRow>
             )}
-            {rows.map((reading) =>
-              editingId === reading.id ? (
+            {rows.map((reading) => {
+              const index = all.findIndex((r) => r.id === reading.id)
+              const before = all[index - 1]
+              const label = formatDateRange(reading)
+              return editingId === reading.id ? (
                 <ReadingEditorRow
                   key={reading.id}
-                  label={formatPeriod(reading)}
+                  label={label}
                   initial={toDraft(reading)}
-                  expectedPrevious={expectedPrevious(reading.id)}
+                  before={beforeOf(before)}
+                  linked={
+                    !before || before.currentReading === reading.previousReading
+                  }
+                  canPay={reading.period.energyBillCents !== null}
                   pending={update.pending}
                   onSubmit={(values) => handleUpdate(reading.id, values)}
                   onCancel={() => setEditingId(null)}
                 />
               ) : (
                 <TableRow key={reading.id}>
-                  <TableCell className="tabular-nums">{reading.year}</TableCell>
-                  <TableCell>{MONTH_NAMES[reading.month - 1]}</TableCell>
-                  <TableCell className="text-right font-semibold tabular-nums">
-                    {formatNumber(reading.currentReading)}
-                  </TableCell>
+                  <TableCell className="tabular-nums">{label}</TableCell>
                   <TableCell className="text-right tabular-nums">
                     {formatNumber(reading.previousReading)}
+                  </TableCell>
+                  <TableCell className="text-right font-semibold tabular-nums">
+                    {formatNumber(reading.currentReading)}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
                     {formatNumber(reading.bill.consumption)}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
-                    {formatKwhPrice(reading.kwhPriceMicros)}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {formatBRL(reading.bill.energyCents)}
+                    {reading.bill.energyCents === null
+                      ? '—'
+                      : formatBRL(reading.bill.energyCents)}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
                     {formatBRL(reading.bill.reserveFundCents)}
                   </TableCell>
                   <TableCell className="text-right font-bold tabular-nums">
-                    {formatBRL(reading.bill.totalCents)}
+                    {reading.bill.totalCents === null ? (
+                      <span className="font-normal text-muted-foreground">
+                        Aguardando conta
+                      </span>
+                    ) : (
+                      formatBRL(reading.bill.totalCents)
+                    )}
                   </TableCell>
                   <TableCell>
                     <StatusBadge paid={reading.paid} />
@@ -327,18 +360,19 @@ function ReadingsTable({
                       <Button
                         variant="ghost"
                         size="icon"
-                        aria-label={`Corrigir leitura de ${formatPeriod(reading)}`}
+                        aria-label={`Corrigir leitura de ${label}`}
                         disabled={editingId !== null}
                         onClick={() => setEditingId(reading.id)}
                       >
                         <Pencil aria-hidden="true" />
                       </Button>
                       <ConfirmDialog
-                        title={`Apagar a leitura de ${formatPeriod(reading)}?`}
+                        title={`Apagar a leitura de ${label}?`}
                         description={
                           <p>
-                            A cobrança deste mês também deixa de existir. Esta
-                            ação não pode ser desfeita.
+                            A cobrança deste período também deixa de existir, e
+                            a conta de energia é dividida de novo entre as
+                            outras chácaras. Esta ação não pode ser desfeita.
                           </p>
                         }
                         confirmLabel="Apagar leitura"
@@ -349,7 +383,7 @@ function ReadingsTable({
                           <Button
                             variant="ghost"
                             size="icon"
-                            aria-label={`Apagar leitura de ${formatPeriod(reading)}`}
+                            aria-label={`Apagar leitura de ${label}`}
                             disabled={editingId !== null || remove.pending}
                           >
                             <Trash2 aria-hidden="true" />
@@ -359,17 +393,16 @@ function ReadingsTable({
                     </div>
                   </TableCell>
                 </TableRow>
-              ),
-            )}
+              )
+            })}
           </TableBody>
           {rows.length > 1 && (
             <TableFooter>
               <TableRow className="font-bold">
-                <TableCell colSpan={4}>Total do período</TableCell>
+                <TableCell colSpan={3}>Total</TableCell>
                 <TableCell className="text-right tabular-nums">
                   {formatNumber(totals.consumption)}
                 </TableCell>
-                <TableCell />
                 <TableCell className="text-right tabular-nums">
                   {formatBRL(totals.energyCents)}
                 </TableCell>
@@ -385,17 +418,27 @@ function ReadingsTable({
           )}
         </Table>
       </Card>
-      <NewReadingForm
-        key={`${sheet.newRow.year}-${sheet.newRow.month}-${sheet.newRow.previousReading}`}
-        initial={toDraft({
-          ...sheet.newRow,
-          currentReading: null,
-          paid: false,
-        })}
-        expectedPrevious={expectedPrevious()}
-        pending={create.pending}
-        onSubmit={handleCreate}
-      />
+      {nextOpen ? (
+        <NewReadingForm
+          key={`${nextOpen.id}-${all.length}-${last?.currentReading}`}
+          periods={open}
+          initialPeriodId={nextOpen.id}
+          pending={create.pending}
+          onSubmit={handleCreate}
+        />
+      ) : (
+        <Notice
+          action={
+            <Button asChild variant="outline">
+              <Link to="/">Ir para Leituras</Link>
+            </Button>
+          }
+        >
+          {sheet.periods.length === 0
+            ? 'Ainda não há períodos de leitura. Crie o primeiro na tela Leituras.'
+            : 'Esta chácara já tem leitura em todos os períodos. Para lançar outra, crie um novo período na tela Leituras.'}
+        </Notice>
+      )}
     </div>
   )
 }

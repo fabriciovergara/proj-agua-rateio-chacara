@@ -2,43 +2,42 @@ import { notFound } from '@tanstack/react-router'
 import { createServerFn } from '@tanstack/react-start'
 import { z } from 'zod'
 import { getDb } from '#/db/client.server'
-import { currentPeriod, todayISO } from '#/lib/periods'
+import { todayISO } from '#/lib/periods'
 import {
   idSchema,
-  monthEntriesSchema,
-  monthSchema,
+  newPeriodSchema,
+  periodSheetSchema,
   readingSchema,
   setPaidSchema,
   updateReadingSchema,
   yearSchema,
 } from '#/lib/schemas'
+import * as periods from './periods.server'
 import * as repo from './readings.server'
 
-const optionalPeriod = z.object({
-  year: yearSchema.optional(),
-  month: monthSchema.optional(),
-})
+export const getPeriodSheet = createServerFn({ method: 'GET' })
+  .validator(z.object({ periodId: idSchema.optional() }))
+  .handler(({ data }) =>
+    repo.getPeriodSheet(getDb(), data.periodId, todayISO()),
+  )
 
-export const getMonthSheet = createServerFn({ method: 'GET' })
-  .validator(optionalPeriod)
+export const savePeriodSheet = createServerFn({ method: 'POST' })
+  .validator(periodSheetSchema)
+  .handler(({ data }) => repo.savePeriodSheet(getDb(), data))
+
+export const createPeriod = createServerFn({ method: 'POST' })
+  .validator(newPeriodSchema)
   .handler(({ data }) => {
-    const db = getDb()
-    const thisMonth = currentPeriod()
-    const period =
-      data.year && data.month
-        ? { year: data.year, month: data.month }
-        : thisMonth
-    return {
-      ...repo.getMonthSheet(db, period),
-      thisMonth,
-      /** Offered in the year picker: years with readings and this one. */
-      years: repo.listYears(db),
-    }
+    const { id } = periods.createPeriod(getDb(), data)
+    return { id }
   })
 
-export const saveMonthReadings = createServerFn({ method: 'POST' })
-  .validator(monthEntriesSchema)
-  .handler(({ data }) => repo.saveMonthReadings(getDb(), data, todayISO()))
+export const deletePeriod = createServerFn({ method: 'POST' })
+  .validator(z.object({ id: idSchema }))
+  .handler(({ data }) => {
+    periods.deletePeriod(getDb(), data.id)
+    return { ok: true as const }
+  })
 
 export const setPaid = createServerFn({ method: 'POST' })
   .validator(setPaidSchema)

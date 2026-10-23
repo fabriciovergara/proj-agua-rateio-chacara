@@ -1,10 +1,11 @@
 /*
  * Brazilian money helpers. Amounts travel through the app as integers:
- * centavos for R$ values and micros (millionths of a real) for the kWh price.
+ * centavos for R$ values and micros (millionths of a real) for the price of
+ * a m³, which needs more than two decimal places.
  */
 
 const MICROS_PER_REAL = 1_000_000
-/** The kWh price is typed and shown with up to 4 decimal places. */
+/** The price of a m³ is shown with up to 4 decimal places. */
 export const PRICE_DECIMALS = 4
 
 const brl = new Intl.NumberFormat('pt-BR', {
@@ -24,11 +25,6 @@ const decimal2 = new Intl.NumberFormat('pt-BR', {
   maximumFractionDigits: 2,
 })
 
-const decimalPrice = new Intl.NumberFormat('pt-BR', {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: PRICE_DECIMALS,
-})
-
 const integer = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 0 })
 
 /** 123456 → "R$ 1.234,56" */
@@ -36,12 +32,12 @@ export function formatBRL(cents: number): string {
   return brl.format(cents / 100)
 }
 
-/** 350000 → "R$ 0,35"; 874300 → "R$ 0,8743" */
-export function formatKwhPrice(micros: number): string {
+/** 350000 → "R$ 0,35"; 4852900 → "R$ 4,8529" */
+export function formatUnitPrice(micros: number): string {
   return brlPrice.format(micros / MICROS_PER_REAL)
 }
 
-/** 1234 → "1.234" (meter readings and kWh). */
+/** 1234 → "1.234" (meter readings and m³). */
 export function formatNumber(value: number): string {
   return integer.format(value)
 }
@@ -49,11 +45,6 @@ export function formatNumber(value: number): string {
 /** Value to pre-fill a money input: 123456 → "1.234,56". */
 export function centsToInput(cents: number | null | undefined): string {
   return cents == null ? '' : decimal2.format(cents / 100)
-}
-
-/** Value to pre-fill a price input: 350000 → "0,35". */
-export function microsToInput(micros: number | null | undefined): string {
-  return micros == null ? '' : decimalPrice.format(micros / MICROS_PER_REAL)
 }
 
 /**
@@ -74,8 +65,8 @@ export function parseScaledDecimal(
   } else {
     const dots = text.split('.').length - 1
     const [head, tail] = text.split('.')
-    // "1.234.567" groups thousands. So does "1.500" in a money field, but in
-    // a kWh price (4 decimals) "1.234" is R$ 1,234, never R$ 1.234,00.
+    // "1.234.567" groups thousands. So does "1.500" in a money field, but
+    // with more decimals (a unit price) "1.234" is R$ 1,234.
     const groupsThousands =
       dots === 1 && tail?.length === 3 && head !== '0' && scale <= 2
     if (dots > 1 || groupsThousands) {
@@ -97,12 +88,6 @@ export function parseScaledDecimal(
 /** "1.234,56" → 123456 centavos. */
 export function parseCents(input: string): number | null {
   return parseScaledDecimal(input, 2)
-}
-
-/** "0,8743" → 874300 micros. */
-export function parsePriceMicros(input: string): number | null {
-  const value = parseScaledDecimal(input, PRICE_DECIMALS)
-  return value == null ? null : value * 10 ** (6 - PRICE_DECIMALS)
 }
 
 /** "R$ 12,34" → "12.34", the amount format used by Pix QR codes. */
