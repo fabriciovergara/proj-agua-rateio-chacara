@@ -11,11 +11,11 @@ import * as schema from '#/db/schema'
 import {
   type BankAccount,
   bankAccount,
-  type MonthRates,
-  monthRates,
   type Owner,
   owners,
+  type Period,
   type Property,
+  periods,
   properties,
   type Reading,
   readings,
@@ -23,15 +23,16 @@ import {
   settings,
 } from '#/db/schema'
 import { UserFacingError } from '#/lib/errors'
-import { todayISO } from '#/lib/periods'
+import { formatDateRange, rangesOverlap, todayISO } from '#/lib/periods'
 import {
-  chacaraMonth,
+  chacaraPeriod,
   chacarasInApp,
   comparable,
   type LegacyImportResult,
-  monthsInApp,
   type Place,
+  readingsInApp,
 } from './legacy.server'
+import { repricePeriod } from './periods.server'
 
 /**
  * A consistent copy of the whole database (VACUUM INTO works while the app
@@ -80,7 +81,7 @@ export function isSqliteFile(bytes: Uint8Array): boolean {
 export type BackupContents = {
   settings: Settings | null
   bank: BankAccount | null
-  monthRates: MonthRates[]
+  periods: Period[]
   owners: Owner[]
   properties: Property[]
   readings: Reading[]
@@ -145,7 +146,11 @@ export function readBackup(bytes: Uint8Array): BackupContents {
     return {
       settings: copy.select().from(settings).get() ?? null,
       bank: copy.select().from(bankAccount).get() ?? null,
-      monthRates: copy.select().from(monthRates).all(),
+      periods: copy
+        .select()
+        .from(periods)
+        .orderBy(asc(periods.startDate))
+        .all(),
       owners: copy.select().from(owners).orderBy(asc(owners.id)).all(),
       properties: copy
         .select()
@@ -168,8 +173,8 @@ export function readBackup(bytes: Uint8Array): BackupContents {
 export type BackupImportResult = LegacyImportResult & {
   /** Proprietários added, with a new chácara or on their own. */
   owners: number
-  /** Months whose kWh price and reserve fund came from the copy. */
-  months: number
+  /** Periods that came from the copy. */
+  periods: number
   /** "Cobranças" and "Dados Bancários" came from the copy. */
   settings: boolean
   bank: boolean
@@ -178,12 +183,14 @@ export type BackupImportResult = LegacyImportResult & {
 /**
  * Brings a backup's data in like the old app's: only what the app doesn't
  * have yet, and nothing already there changes. A chácara with the same name
- * or meter is the same chácara: it keeps its owner and gets only the months
- * it lacks. A new chácara's owner is the proprietário with the same name,
- * if the app has one. "Cobranças", "Dados Bancários" and each month's values
- * come only when the app has none. Records keep their numbers (as in
- * /chacaras/3) when the app isn't using them, so after "Apagar todos os
- * dados" this restores the copy exactly. Passwords never come from a copy.
+ * or meter is the same chácara: it keeps its owner and gets only the
+ * periods it lacks. A new chácara's owner is the proprietário with the same
+ * name, if the app has one. A period with the same dates is the same period;
+ * one whose dates overlap a period of the app is left out. "Cobranças" and
+ * "Dados Bancários" come only when the app has none. Records keep their
+ * numbers (as in /chacaras/3) when the app isn't using them, so after
+ * "Apagar todos os dados" this restores the copy exactly. Passwords never
+ * come from a copy.
  */
 export function importBackup(
   db: Executor,
@@ -196,7 +203,7 @@ export function importBackup(
     existing: 0,
     skipped: [],
     owners: 0,
-    months: 0,
+    periods: 0,
     settings: false,
     bank: false,
   }
@@ -211,20 +218,48 @@ export function importBackup(
         tx.insert(bankAccount).values(backup.bank).run()
         result.bank = true
       }
-      for (const rates of backup.monthRates) {
-        const added = tx
-          .insert(monthRates)
-          .values(rates)
-          .onConflictDoNothing()
-          .returning({ year: monthRates.year })
-          .get()
-        if (added) result.months++
-      }
 
       // Numbers in use. A record keeps the copy's number when it is free;
       // otherwise it gets a new one, which is then in use too.
       const idsOf = (rows: { id: number }[]) =>
         new Set(rows.map(({ id }) => id))
+      const free = (used: Set<number>, id: number) =>
+        used.has(id) ? undefined : id
+
+      // Copy's period id → app's period id
+      const appPeriods = tx.select().from(periods).all()
+      const periodIds = idsOf(appPeriods)
+      const periodFor = new Map<number, number>()
+      // Periods of the app that may get readings: their bills are split again.
+      const inApp = new Set<number>()
+      for (const { id, ...period } of backup.periods) {
+        const same = appPeriods.find(
+          (other) =>
+            other.startDate === period.startDate &&
+            other.endDate === period.endDate,
+        )
+        if (same) {
+          periodFor.set(id, same.id)
+          inApp.add(same.id)
+          continue
+        }
+        const clash = appPeriods.find((other) => rangesOverlap(other, period))
+        if (clash) {
+          result.skipped.push(
+            `Período de ${formatDateRange(period)}: o app tem o período de ${formatDateRange(clash)} nessas datas; as leituras dele não foram importadas`,
+          )
+          continue
+        }
+        const added = tx
+          .insert(periods)
+          .values({ ...period, id: free(periodIds, id) })
+          .returning()
+          .get()
+        periodIds.add(added.id)
+        appPeriods.push(added)
+        periodFor.set(id, added.id)
+        result.periods++
+      }
       const ownerIds = idsOf(tx.select({ id: owners.id }).from(owners).all())
       const propertyIds = idsOf(
         tx.select({ id: properties.id }).from(properties).all(),
@@ -232,8 +267,6 @@ export function importBackup(
       const readingIds = idsOf(
         tx.select({ id: readings.id }).from(readings).all(),
       )
-      const free = (used: Set<number>, id: number) =>
-        used.has(id) ? undefined : id
 
       // Proprietários already in the app, by name.
       const ownerByName = new Map<string, number>()
@@ -310,12 +343,15 @@ export function importBackup(
         if (!withChacara.has(owner.id)) addOwner(owner)
       }
 
-      // Months each chácara already has: those stay as they are.
-      const taken = monthsInApp(tx)
-      for (const { id, propertyId, ...reading } of backup.readings) {
+      // Periods each chácara already has a reading in: those stay as they are.
+      const taken = readingsInApp(tx)
+      const reprice = new Set<number>()
+      for (const { id, propertyId, periodId, ...reading } of backup.readings) {
         const chacara = chacaraFor.get(propertyId)
-        if (!chacara) continue // Left out above, with the reason.
-        const key = chacaraMonth(chacara.id, reading)
+        const period = periodFor.get(periodId)
+        // Left out above, with the reason.
+        if (!chacara || period === undefined) continue
+        const key = chacaraPeriod(chacara.id, period)
         if (taken.has(key)) {
           result.existing++
           continue
@@ -327,12 +363,15 @@ export function importBackup(
             ...reading,
             id: free(readingIds, id),
             propertyId: chacara.id,
+            periodId: period,
           })
           .returning({ id: readings.id })
           .get()
         readingIds.add(added.id)
+        if (inApp.has(period)) reprice.add(period)
         result.readings++
       }
+      for (const period of reprice) repricePeriod(tx, period)
     })
   } catch (error) {
     // The copy's own rules are the app's, so this means a damaged file.

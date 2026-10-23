@@ -1,15 +1,24 @@
 import { Database } from 'bun:sqlite'
 import { describe, expect, spyOn, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { asc, eq } from 'drizzle-orm'
-import { type DB, openDatabase } from '#/db/client.server'
+import { drizzle } from 'drizzle-orm/bun-sqlite'
+import { migrate } from 'drizzle-orm/bun-sqlite/migrator'
+import { type DB, MIGRATIONS_FOLDER, openDatabase } from '#/db/client.server'
 import {
   appPassword,
   bankAccount,
-  monthRates,
   owners,
+  periods,
   properties,
   readings,
   settings,
@@ -18,6 +27,9 @@ import { createSession, setAppPassword } from './auth.server'
 import { createBackup, importBackup, readBackup } from './backup.server'
 import { deleteAllData } from './data.server'
 import { createOwner } from './owners.server'
+
+const JAN = { startDate: '2025-12-10', endDate: '2026-01-10' }
+const FEB = { startDate: '2026-01-10', endDate: '2026-02-10' }
 
 test('the backup is a complete SQLite database, without sessions', async () => {
   const db = openDatabase(':memory:')
@@ -88,39 +100,40 @@ async function sourceApp() {
     ])
     .returning()
     .all()
+  const [jan, feb] = db
+    .insert(periods)
+    .values([
+      { ...JAN, energyBillCents: 5000, reserveFundCents: 1500 },
+      { ...FEB, energyBillCents: 6000, reserveFundCents: 1500 },
+    ])
+    .returning()
+    .all()
   const reading = (
     propertyId: number | undefined,
-    month: number,
+    periodId: number | undefined,
     previousReading: number,
     currentReading: number,
-    kwhPriceMicros: number,
+    energyCents: number,
   ) => ({
     propertyId: propertyId ?? 0,
-    year: 2026,
-    month,
+    periodId: periodId ?? 0,
     previousReading,
     currentReading,
-    kwhPriceMicros,
+    energyCents,
     reserveFundCents: 1500,
   })
   db.insert(readings)
     .values([
       {
-        ...reading(sete?.id, 1, 100, 150, 850_000),
+        ...reading(sete?.id, jan?.id, 100, 150, 3570),
         paid: true,
         paidAt: '2026-02-10',
-        readingDate: '2026-01-31',
+        endDate: '2026-01-12',
         notes: 'Conferida',
       },
-      reading(sete?.id, 2, 150, 190, 870_000),
-      reading(nove?.id, 1, 10, 30, 850_000),
-      reading(onze?.id, 2, 500, 520, 870_000),
-    ])
-    .run()
-  db.insert(monthRates)
-    .values([
-      { year: 2026, month: 1, kwhPriceMicros: 850_000, reserveFundCents: 1500 },
-      { year: 2026, month: 2, kwhPriceMicros: 870_000, reserveFundCents: 1500 },
+      reading(sete?.id, feb?.id, 150, 190, 4000),
+      reading(nove?.id, jan?.id, 10, 30, 1430),
+      reading(onze?.id, feb?.id, 500, 520, 2000),
     ])
     .run()
   db.insert(settings)
@@ -146,11 +159,7 @@ const contents = (db: DB) => ({
   owners: db.select().from(owners).orderBy(asc(owners.id)).all(),
   properties: db.select().from(properties).orderBy(asc(properties.id)).all(),
   readings: db.select().from(readings).orderBy(asc(readings.id)).all(),
-  monthRates: db
-    .select()
-    .from(monthRates)
-    .orderBy(asc(monthRates.year), asc(monthRates.month))
-    .all(),
+  periods: db.select().from(periods).orderBy(asc(periods.id)).all(),
   settings: db.select().from(settings).all(),
   bank: db.select().from(bankAccount).all(),
 })
@@ -192,7 +201,7 @@ describe('importing a backup', () => {
       existing: 0,
       skipped: [],
       owners: 3,
-      months: 2,
+      periods: 2,
       settings: true,
       bank: true,
     })
@@ -214,24 +223,20 @@ describe('importing a backup', () => {
       .values({ name: 'chacara  7', ownerId: dona?.id })
       .returning()
       .get()
+    // January typed in the app, with its own bill.
+    const january = target
+      .insert(periods)
+      .values({ ...JAN, energyBillCents: 8000, reserveFundCents: 2000 })
+      .returning()
+      .get()
     target
       .insert(readings)
       .values({
         propertyId: typed.id,
-        year: 2026,
-        month: 1,
+        periodId: january.id,
         previousReading: 100,
         currentReading: 160,
-        kwhPriceMicros: 900_000,
-        reserveFundCents: 2000,
-      })
-      .run()
-    target
-      .insert(monthRates)
-      .values({
-        year: 2026,
-        month: 1,
-        kwhPriceMicros: 900_000,
+        energyCents: 8000,
         reserveFundCents: 2000,
       })
       .run()
@@ -244,7 +249,7 @@ describe('importing a backup', () => {
       existing: 1,
       skipped: [],
       owners: 1,
-      months: 1,
+      periods: 1,
       settings: false,
       bank: true,
     })
@@ -252,14 +257,14 @@ describe('importing a backup', () => {
     // The chácara typed in keeps its owner and its January; February came.
     expect(
       target
-        .select({ month: readings.month, current: readings.currentReading })
+        .select({ period: readings.periodId, current: readings.currentReading })
         .from(readings)
         .where(eq(readings.propertyId, typed.id))
-        .orderBy(asc(readings.month))
+        .orderBy(asc(readings.periodId))
         .all(),
     ).toEqual([
-      { month: 1, current: 160 },
-      { month: 2, current: 190 },
+      { period: january.id, current: 160 },
+      { period: january.id + 1, current: 190 },
     ])
     expect(
       target.select().from(properties).where(eq(properties.id, typed.id)).get()
@@ -290,17 +295,35 @@ describe('importing a backup', () => {
       { name: 'teodora  exemplo' },
       { name: 'Quirino Exemplo' },
     ])
-    // Values the app already had stay.
+    // Values the app already had stay; January's bill is split again with
+    // the chácara that came: 60 and 20 m³.
     expect(target.select().from(settings).get()?.groupName).toBe('Outro grupo')
     expect(
       target
-        .select({ month: monthRates.month, price: monthRates.kwhPriceMicros })
-        .from(monthRates)
-        .orderBy(asc(monthRates.month))
+        .select({
+          bill: periods.energyBillCents,
+          fund: periods.reserveFundCents,
+        })
+        .from(periods)
+        .orderBy(asc(periods.startDate))
         .all(),
     ).toEqual([
-      { month: 1, price: 900_000 },
-      { month: 2, price: 870_000 },
+      { bill: 8000, fund: 2000 },
+      { bill: 6000, fund: 1500 },
+    ])
+    expect(
+      target
+        .select({
+          energy: readings.energyCents,
+          fund: readings.reserveFundCents,
+        })
+        .from(readings)
+        .where(eq(readings.periodId, january.id))
+        .orderBy(asc(readings.id))
+        .all(),
+    ).toEqual([
+      { energy: 6000, fund: 2000 },
+      { energy: 2000, fund: 2000 },
     ])
 
     // The same copy again adds nothing.
@@ -311,10 +334,31 @@ describe('importing a backup', () => {
       existing: 4,
       skipped: [],
       owners: 0,
-      months: 0,
+      periods: 0,
       settings: false,
       bank: false,
     })
+  })
+
+  test('a period whose dates overlap one of the app is left out', async () => {
+    const backup = readBackup(await backupOf(await sourceApp()))
+    const target = openDatabase(':memory:')
+    target
+      .insert(periods)
+      .values({
+        startDate: '2026-01-01',
+        endDate: '2026-02-01',
+        reserveFundCents: 1000,
+      })
+      .run()
+
+    const result = importBackup(target, backup)
+
+    expect(result.skipped).toEqual([
+      'Período de 10/12/2025 a 10/01/2026: o app tem o período de 01/01/2026 a 01/02/2026 nessas datas; as leituras dele não foram importadas',
+      'Período de 10/01/2026 a 10/02/2026: o app tem o período de 01/01/2026 a 01/02/2026 nessas datas; as leituras dele não foram importadas',
+    ])
+    expect(result).toMatchObject({ created: 3, readings: 0, periods: 0 })
   })
 
   /** The copy with a second "Chácara 7", which has a March reading. */
@@ -322,9 +366,18 @@ describe('importing a backup', () => {
     const backup = readBackup(await backupOf(await sourceApp()))
     const [sete] = backup.properties
     const [reading] = backup.readings
-    if (!sete || !reading) throw new Error('A cópia de teste tem a Chácara 7.')
+    const [period] = backup.periods
+    if (!sete || !reading || !period) {
+      throw new Error('A cópia de teste tem a Chácara 7.')
+    }
+    backup.periods.push({
+      ...period,
+      id: 3,
+      startDate: '2026-02-10',
+      endDate: '2026-03-10',
+    })
     backup.properties.push({ ...sete, id: 99, meterNumber: null })
-    backup.readings.push({ ...reading, id: 99, propertyId: 99, month: 3 })
+    backup.readings.push({ ...reading, id: 99, propertyId: 99, periodId: 3 })
     return backup
   }
 
@@ -349,7 +402,7 @@ describe('importing a backup', () => {
     // The first Chácara 7 and Chácara 11 come with their readings.
     expect(result).toMatchObject({ created: 1, matched: 1, readings: 3 })
     expect(
-      target.select().from(readings).where(eq(readings.month, 3)).all(),
+      target.select().from(readings).where(eq(readings.periodId, 3)).all(),
     ).toHaveLength(0)
   })
 
@@ -371,6 +424,49 @@ describe('importing a backup', () => {
   })
 })
 
+/**
+ * A copy made by the app when readings were kept by month (migrations
+ * 0000 to 0003), with a gap in February.
+ */
+function monthlyCopy(): Uint8Array {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'rateio-test-'))
+  try {
+    const folder = path.join(directory, 'drizzle')
+    mkdirSync(path.join(folder, 'meta'), { recursive: true })
+    const journal = JSON.parse(
+      readFileSync(path.join(MIGRATIONS_FOLDER, 'meta/_journal.json'), 'utf8'),
+    ) as { entries: { tag: string }[] }
+    journal.entries = journal.entries.filter((entry) => entry.tag < '0004')
+    writeFileSync(
+      path.join(folder, 'meta/_journal.json'),
+      JSON.stringify(journal),
+    )
+    for (const { tag } of journal.entries) {
+      copyFileSync(
+        path.join(MIGRATIONS_FOLDER, `${tag}.sql`),
+        path.join(folder, `${tag}.sql`),
+      )
+    }
+
+    const sqlite = new Database(':memory:')
+    migrate(drizzle({ client: sqlite }), { migrationsFolder: folder })
+    sqlite.run("INSERT INTO properties (id, name) VALUES (1, 'Chácara 7')")
+    sqlite.run(
+      `INSERT INTO readings (property_id, year, month, previous_reading, current_reading, kwh_price_micros, reserve_fund_cents, paid)
+       VALUES (1, 2026, 1, 100, 150, 850000, 1500, 1), (1, 2026, 3, 150, 190, 870000, 1500, 0)`,
+    )
+    sqlite.run(
+      `INSERT INTO month_rates (year, month, kwh_price_micros, reserve_fund_cents)
+       VALUES (2026, 1, 850000, 1500), (2026, 3, 870000, 1500)`,
+    )
+    const bytes = sqlite.serialize()
+    sqlite.close()
+    return bytes
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+}
+
 describe('reading a backup', () => {
   test('refuses files that are not a backup of the app', () => {
     const notABackup =
@@ -391,31 +487,31 @@ describe('reading a backup', () => {
     )
   })
 
-  test('a copy from an older version is brought up to date', async () => {
-    // As it was before kWh prices were kept per month (0001_month_rates).
-    const old = editBackup(await backupOf(await sourceApp()), (copy) => {
-      copy.run('DROP TABLE month_rates')
-      copy.run('DROP TABLE app_password')
-      copy.run('DROP TABLE sessions')
-      copy.run('ALTER TABLE settings ADD COLUMN kwh_price_micros integer')
-      copy.run('ALTER TABLE settings ADD COLUMN reserve_fund_cents integer')
-      copy.run(
-        'DELETE FROM __drizzle_migrations WHERE created_at > (SELECT min(created_at) FROM __drizzle_migrations)',
-      )
-    })
+  test('a copy made by months, before periods, comes as periods', () => {
+    const backup = readBackup(monthlyCopy())
 
-    const backup = readBackup(old)
-
-    expect(backup.owners).toHaveLength(3)
-    // Migrations made the months' values from the readings.
     expect(
-      backup.monthRates.map(({ month, kwhPriceMicros }) => ({
-        month,
-        kwhPriceMicros,
+      backup.periods.map(({ startDate, endDate, energyBillCents }) => ({
+        startDate,
+        endDate,
+        energyBillCents,
       })),
     ).toEqual([
-      { month: 1, kwhPriceMicros: 850_000 },
-      { month: 2, kwhPriceMicros: 870_000 },
+      // January 2026, then March 2026 billed with February.
+      { startDate: '2025-12-10', endDate: '2026-01-10', energyBillCents: 4250 },
+      { startDate: '2026-01-10', endDate: '2026-03-10', energyBillCents: 3480 },
+    ])
+    // Each reading keeps what it charged: m³ × its price (the old
+    // kwh_price_micros column, which was really per m³).
+    expect(
+      backup.readings.map(({ energyCents, reserveFundCents, paid }) => ({
+        energyCents,
+        reserveFundCents,
+        paid,
+      })),
+    ).toEqual([
+      { energyCents: 4250, reserveFundCents: 1500, paid: true },
+      { energyCents: 3480, reserveFundCents: 1500, paid: false },
     ])
   })
 

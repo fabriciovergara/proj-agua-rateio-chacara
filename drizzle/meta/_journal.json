@@ -29,6 +29,13 @@
       "when": 1792681030421,
       "tag": "0003_session_env_password",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1792755968000,
+      "tag": "0004_periods",
+      "breakpoints": true
     }
   ]
 }

@@ -26,8 +26,8 @@ import {
   TableHeader,
   TableRow,
 } from '#/components/ui/table'
-import { formatBRL, formatKwhPrice, formatNumber } from '#/lib/money'
-import { formatPeriod, MONTH_SHORT } from '#/lib/periods'
+import { formatBRL, formatNumber, formatUnitPrice } from '#/lib/money'
+import { formatDate, formatDateRange, MONTH_SHORT } from '#/lib/periods'
 import { getChartData, getReportOptions } from '#/server/reports.functions'
 
 export const Route = createFileRoute('/graficos')({
@@ -58,16 +58,29 @@ const compactBRL = new Intl.NumberFormat('pt-BR', {
 const moneyTick = (cents: number) => compactBRL.format(cents / 100)
 const axisTick = { fontSize: 14 }
 
-/** "jan/26" on January and on the first month, just "fev" otherwise. */
-function monthTicks(data: ChartData) {
-  return data.monthly.map((month, index) => ({
-    ...month,
-    tick:
-      index === 0 || month.month === 1
-        ? `${MONTH_SHORT[month.month - 1]}/${String(month.year).slice(2)}`
-        : MONTH_SHORT[month.month - 1],
-    title: formatPeriod(month),
-  }))
+/**
+ * Each period by the month it ends in: "jan/26" on January and on the
+ * first one, just "fev" otherwise. Two periods ending in the same month
+ * get their end dates ("10/02") instead.
+ */
+function periodTicks(data: ChartData) {
+  const months = data.byPeriod.map((period) => period.endDate.slice(0, 7))
+  const repeated = new Set(months).size !== months.length
+  return data.byPeriod.map((period, index) => {
+    const year = Number(period.endDate.slice(0, 4))
+    const month = Number(period.endDate.slice(5, 7))
+    const short = MONTH_SHORT[month - 1] ?? ''
+    return {
+      ...period,
+      key: String(period.id),
+      tick: repeated
+        ? formatDate(period.endDate).slice(0, 5)
+        : index === 0 || month === 1
+          ? `${short}/${String(year).slice(2)}`
+          : short,
+      title: formatDateRange(period),
+    }
+  })
 }
 
 /** shadcn tooltip rows with Brazilian formatting instead of toLocaleString. */
@@ -100,16 +113,15 @@ function ChartsPage() {
 
   const averagePriceMicros =
     totals.consumption > 0
-      ? Math.round((totals.energyCents * 10_000) / totals.consumption / 100) *
-        100
+      ? Math.round((totals.energyCents * 10_000) / totals.consumption)
       : null
-  const rangeLabel = ano ? `em ${ano}` : 'nos últimos 12 meses'
+  const rangeLabel = ano ? `em ${ano}` : 'nos últimos 12 períodos'
 
   return (
     <div className="flex flex-col gap-8">
       <PageHeader
         title="Gráficos"
-        description="Quanto a bomba gastou de energia, quem consumiu mais e como estão os pagamentos."
+        description="Quanto a bomba gastou de energia, quem consumiu mais água e como estão os pagamentos."
         className="mb-0"
       />
 
@@ -123,7 +135,7 @@ function ChartsPage() {
             })
           }
           options={[
-            { value: '', label: 'Últimos 12 meses' },
+            { value: '', label: 'Últimos 12 períodos' },
             ...options.years.map((year) => ({ value: year, label: year })),
           ]}
         />
@@ -161,19 +173,19 @@ function ChartsPage() {
         <>
           <dl className="grid grid-cols-2 gap-x-6 gap-y-5 border-y py-5 tabular-nums md:grid-cols-3 lg:grid-cols-6">
             <Stat
-              label="Custo da energia"
-              value={formatBRL(totals.energyCents)}
+              label={chacara ? 'Energia da chácara' : 'Contas de energia'}
+              value={formatBRL(chacara ? totals.energyCents : totals.billCents)}
             />
             <Stat
-              label="Consumo"
-              value={`${formatNumber(totals.consumption)} kWh`}
+              label="Água consumida"
+              value={`${formatNumber(totals.consumption)} m³`}
             />
             <Stat
-              label="Preço médio do kWh"
+              label="Preço médio do m³"
               value={
                 averagePriceMicros === null
                   ? '—'
-                  : formatKwhPrice(averagePriceMicros)
+                  : formatUnitPrice(averagePriceMicros)
               }
             />
             <Stat
@@ -188,10 +200,10 @@ function ChartsPage() {
             />
           </dl>
 
-          <EnergyByMonth data={data} rangeLabel={rangeLabel} />
+          <EnergyByPeriod data={data} rangeLabel={rangeLabel} />
           <div className="grid gap-8 xl:grid-cols-2">
             <ConsumptionByProperty data={data} rangeLabel={rangeLabel} />
-            <PaymentsByMonth data={data} />
+            <PaymentsByPeriod data={data} />
           </div>
         </>
       )}
@@ -220,17 +232,17 @@ function Stat({
   )
 }
 
-function EnergyByMonth({
+function EnergyByPeriod({
   data,
   rangeLabel,
 }: {
   data: ChartData
   rangeLabel: string
 }) {
-  const rows = monthTicks(data).map((month) => ({
-    ...month,
+  const rows = periodTicks(data).map((period) => ({
+    ...period,
     ...Object.fromEntries(
-      data.series.map((s) => [`s${s.id}`, month.energyBySeries[s.id] ?? 0]),
+      data.series.map((s) => [`s${s.id}`, period.energyBySeries[s.id] ?? 0]),
     ),
   }))
   const config = Object.fromEntries(
@@ -243,14 +255,14 @@ function EnergyByMonth({
 
   return (
     <ChartCard
-      title="Custo da energia por mês"
-      description={`Consumo × preço do kWh de cada chácara ${rangeLabel}, sem o fundo de reserva.`}
+      title="Custo da energia por período"
+      description={`A conta de energia de cada período dividida pelo consumo de água de cada chácara ${rangeLabel}, sem o fundo de reserva.`}
       height={380}
       table={
         <Table className="text-[0.95rem]">
           <TableHeader>
             <TableRow>
-              <TableHead>Mês</TableHead>
+              <TableHead>Período</TableHead>
               {data.series.map((s) => (
                 <TableHead key={s.id} className="text-right">
                   {s.name}
@@ -260,16 +272,16 @@ function EnergyByMonth({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map((month) => (
-              <TableRow key={month.key}>
-                <TableCell>{month.title}</TableCell>
+            {rows.map((period) => (
+              <TableRow key={period.key}>
+                <TableCell className="tabular-nums">{period.title}</TableCell>
                 {data.series.map((s) => (
                   <TableCell key={s.id} className="text-right tabular-nums">
-                    {formatBRL(month.energyBySeries[s.id] ?? 0)}
+                    {formatBRL(period.energyBySeries[s.id] ?? 0)}
                   </TableCell>
                 ))}
                 <TableCell className="text-right font-bold tabular-nums">
-                  {formatBRL(month.energyCents)}
+                  {formatBRL(period.energyCents)}
                 </TableCell>
               </TableRow>
             ))}
@@ -348,15 +360,15 @@ function ConsumptionByProperty({
 
   return (
     <ChartCard
-      title="Consumo por chácara"
-      description={`kWh medidos ${rangeLabel}, do maior para o menor.`}
+      title="Consumo de água por chácara"
+      description={`m³ medidos nos hidrômetros ${rangeLabel}, do maior para o menor.`}
       height={height}
       table={
         <Table className="text-[0.95rem]">
           <TableHeader>
             <TableRow>
               <TableHead>Chácara</TableHead>
-              <TableHead className="text-right">Consumo (kWh)</TableHead>
+              <TableHead className="text-right">Consumo (m³)</TableHead>
               <TableHead className="text-right">Custo da energia</TableHead>
             </TableRow>
           </TableHeader>
@@ -407,7 +419,7 @@ function ConsumptionByProperty({
               <ChartTooltipContent
                 className="min-w-[12rem] text-sm"
                 formatter={tooltipFormatter(
-                  (value) => `${formatNumber(value)} kWh`,
+                  (value) => `${formatNumber(value)} m³`,
                 )}
               />
             }
@@ -423,7 +435,7 @@ function ConsumptionByProperty({
             <LabelList
               dataKey="consumption"
               position="right"
-              formatter={(value) => `${formatNumber(Number(value))} kWh`}
+              formatter={(value) => `${formatNumber(Number(value))} m³`}
               className="fill-muted-foreground"
               fontSize={14}
             />
@@ -434,8 +446,8 @@ function ConsumptionByProperty({
   )
 }
 
-function PaymentsByMonth({ data }: { data: ChartData }) {
-  const rows = monthTicks(data)
+function PaymentsByPeriod({ data }: { data: ChartData }) {
+  const rows = periodTicks(data)
   const config = {
     paidCents: { label: 'Pago', color: STATUS_COLORS.paid },
     pendingCents: { label: 'Pendente', color: STATUS_COLORS.pending },
@@ -443,27 +455,27 @@ function PaymentsByMonth({ data }: { data: ChartData }) {
 
   return (
     <ChartCard
-      title="Pagamentos por mês"
+      title="Pagamentos por período"
       description="Valor total cobrado (energia + fundo), separado entre pago e pendente."
       height={320}
       table={
         <Table className="text-[0.95rem]">
           <TableHeader>
             <TableRow>
-              <TableHead>Mês</TableHead>
+              <TableHead>Período</TableHead>
               <TableHead className="text-right">Pago</TableHead>
               <TableHead className="text-right">Pendente</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map((month) => (
-              <TableRow key={month.key}>
-                <TableCell>{month.title}</TableCell>
+            {rows.map((period) => (
+              <TableRow key={period.key}>
+                <TableCell className="tabular-nums">{period.title}</TableCell>
                 <TableCell className="text-right tabular-nums">
-                  {formatBRL(month.paidCents)}
+                  {formatBRL(period.paidCents)}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">
-                  {formatBRL(month.pendingCents)}
+                  {formatBRL(period.pendingCents)}
                 </TableCell>
               </TableRow>
             ))}

@@ -1,18 +1,7 @@
-import { cn } from 'cn'
 import { Check, X } from 'lucide-react'
-import { type ChangeEvent, type FormEvent, useState } from 'react'
+import { type ChangeEvent, type FormEvent, useId, useState } from 'react'
 import { toast } from 'sonner'
-import { FormField, MeterInput, MoneyInput } from '#/components/form'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '#/components/ui/alert-dialog'
+import { DateInput, FormField, MeterInput } from '#/components/form'
 import { Button } from '#/components/ui/button'
 import {
   Card,
@@ -21,142 +10,141 @@ import {
   CardHeader,
   CardTitle,
 } from '#/components/ui/card'
+import { Checkbox } from '#/components/ui/checkbox'
 import { FieldGroup } from '#/components/ui/field'
 import { Input } from '#/components/ui/input'
+import { Label } from '#/components/ui/label'
 import { NativeSelect, NativeSelectOption } from '#/components/ui/native-select'
 import { TableCell, TableRow } from '#/components/ui/table'
-import { computeBill } from '#/lib/billing'
+import { formatNumber } from '#/lib/money'
 import {
-  centsToInput,
-  formatBRL,
-  formatKwhPrice,
-  formatNumber,
-  microsToInput,
-  parseCents,
-  parsePriceMicros,
-} from '#/lib/money'
-import { MONTH_NAMES, type Period } from '#/lib/periods'
+  type DateRange,
+  formatDate,
+  formatDateRange,
+  parseDate,
+} from '#/lib/periods'
 
 export interface ReadingValues {
-  year: number
-  month: number
   previousReading: number
   currentReading: number
-  kwhPriceMicros: number
-  reserveFundCents: number
+  startDate: string
+  endDate: string
   paid: boolean
-  /** The person confirmed a "leitura anterior" off the chain (new meter). */
-  confirmPreviousChange?: boolean
+  /** The meter was replaced: the reading before stays as it is. */
+  meterReplaced?: boolean
 }
 
-/** The reading that "leitura anterior" should repeat, if there is one. */
-export type ExpectedPrevious = (
-  period: Period,
-) => { value: number; label: string } | null
+/** The chácara's reading before this one: what "Última leitura" repeats. */
+export type Before = DateRange & {
+  previousReading: number
+  currentReading: number
+}
 
 export interface ReadingDraft {
-  year: string
-  month: string
+  start: string
+  end: string
   previous: string
   current: string
-  price: string
-  fund: string
   status: 'pago' | 'pendente'
+  meterReplaced: boolean
 }
 
 export function toDraft(values: {
-  year: number
-  month: number
+  startDate: string
+  endDate: string
   previousReading: number | null
   currentReading: number | null
-  kwhPriceMicros: number | null
-  reserveFundCents: number | null
   paid: boolean
 }): ReadingDraft {
   return {
-    year: String(values.year),
-    month: String(values.month),
+    start: formatDate(values.startDate),
+    end: formatDate(values.endDate),
     previous:
       values.previousReading === null ? '' : String(values.previousReading),
     current:
       values.currentReading === null ? '' : String(values.currentReading),
-    price: microsToInput(values.kwhPriceMicros),
-    fund: centsToInput(values.reserveFundCents),
     status: values.paid ? 'pago' : 'pendente',
+    meterReplaced: false,
   }
 }
 
-/** Turns the typed text into numbers, or explains the first problem found. */
+type Field = 'start' | 'end' | 'previous' | 'current'
+
+/**
+ * Turns the typed text into values, or explains the first problem found.
+ * `linked`: the reading before follows "Última leitura" (same meter).
+ */
 function parseDraft(
   draft: ReadingDraft,
-): { values: ReadingValues } | { error: string; field: keyof ReadingDraft } {
-  const year = Number(draft.year)
-  if (!Number.isInteger(year) || year < 2000 || year > 2100)
-    return { error: 'Informe um ano válido, como 2026.', field: 'year' }
-  if (draft.current === '')
-    return { error: 'Informe a leitura atual.', field: 'current' }
-  if (draft.previous === '')
-    return { error: 'Informe a leitura anterior.', field: 'previous' }
-  const currentReading = Number(draft.current)
-  const previousReading = Number(draft.previous)
-  if (currentReading < previousReading)
-    return {
-      error: 'A leitura atual não pode ser menor que a anterior.',
-      field: 'current',
-    }
-  const kwhPriceMicros = parsePriceMicros(draft.price)
-  if (kwhPriceMicros === null)
-    return { error: 'Informe o preço do kWh, como 0,85.', field: 'price' }
-  const reserveFundCents = parseCents(draft.fund)
-  if (reserveFundCents === null)
-    return { error: 'Informe o fundo de reserva, como 10,00.', field: 'fund' }
+  before: Before | null,
+  linked: boolean,
+) {
+  const startDate = parseDate(draft.start)
+  const endDate = parseDate(draft.end)
+  const previous = draft.previous === '' ? null : Number(draft.previous)
+  const current = draft.current === '' ? null : Number(draft.current)
+  const corrects =
+    before !== null &&
+    linked &&
+    previous !== null &&
+    previous !== before.currentReading
+  const meterQuestion =
+    corrects && previous !== null && previous < (before?.previousReading ?? 0)
+
+  const fail = (error: string, field: Field) => ({
+    error,
+    field,
+    corrects,
+    meterQuestion,
+  })
+  if (!startDate) return fail('Informe a data da última leitura.', 'start')
+  if (!endDate) return fail('Informe a data da leitura.', 'end')
+  if (startDate >= endDate)
+    return fail('A data da leitura precisa ser depois da última.', 'end')
+  if (previous === null) return fail('Informe a última leitura.', 'previous')
+  if (current === null) return fail('Informe a leitura atual.', 'current')
+  if (current < previous)
+    return fail('A leitura atual não pode ser menor que a última.', 'current')
+  if (meterQuestion && !draft.meterReplaced)
+    return fail(
+      `A última leitura é menor que a anterior a ela (${formatNumber(before?.previousReading ?? 0)}). Confira o número ou marque “Hidrômetro trocado”.`,
+      'previous',
+    )
   return {
     values: {
-      year,
-      month: Number(draft.month),
-      previousReading,
-      currentReading,
-      kwhPriceMicros,
-      reserveFundCents,
+      startDate,
+      endDate,
+      previousReading: previous,
+      currentReading: current,
       paid: draft.status === 'pago',
-    },
+      meterReplaced: (meterQuestion && draft.meterReplaced) || undefined,
+    } satisfies ReadingValues,
+    corrects: corrects && !meterQuestion,
+    meterQuestion,
   }
 }
 
 /** Draft state shared by the inline editor and the "Nova leitura" form. */
 function useReadingDraft(
   initial: ReadingDraft,
-  expectedPrevious: ExpectedPrevious,
-  /** Editing only asks about the previous reading if it was changed. */
-  onlyIfChanged: boolean,
+  before: Before | null,
+  linked: boolean,
 ) {
   const [draft, setDraft] = useState(initial)
-  const [invalidField, setInvalidField] = useState<keyof ReadingDraft | null>(
-    null,
-  )
-  const parsed = parseDraft(draft)
-  const bill = 'values' in parsed ? computeBill(parsed.values) : null
-  const expected =
+  const [invalidField, setInvalidField] = useState<Field | null>(null)
+  const parsed = parseDraft(draft, before, linked)
+  const consumption =
     'values' in parsed
-      ? expectedPrevious({
-          year: parsed.values.year,
-          month: parsed.values.month,
-        })
+      ? parsed.values.currentReading - parsed.values.previousReading
       : null
-  /** "Leitura anterior" differs from the month before: needs a confirm. */
-  const offChain =
-    'values' in parsed &&
-    expected !== null &&
-    parsed.values.previousReading !== expected.value &&
-    (!onlyIfChanged || draft.previous !== initial.previous)
 
   function set<K extends keyof ReadingDraft>(key: K, value: ReadingDraft[K]) {
     setDraft((current) => ({ ...current, [key]: value }))
     if (invalidField === key) setInvalidField(null)
   }
 
-  /** Props for the plain number inputs (year, readings). */
-  function digits(key: 'previous' | 'current' | 'year') {
+  /** Props for the plain number inputs. */
+  function digits(key: 'previous' | 'current') {
     return {
       value: draft[key],
       inputMode: 'numeric' as const,
@@ -180,108 +168,77 @@ function useReadingDraft(
   return {
     draft,
     set,
+    setDraft,
     digits,
-    bill,
-    parsed,
+    consumption,
     invalidField,
     validate,
-    expected,
-    offChain,
+    corrects: parsed.corrects,
+    meterQuestion: parsed.meterQuestion,
   }
 }
 
-/** Asks before saving a "leitura anterior" that breaks the chain. */
-function ChainConfirmDialog({
-  pending,
-  expected,
-  onCancel,
-  onConfirm,
+/** Under "Última leitura": what saving it also changes, or the meter question. */
+function ChainNote({
+  before,
+  corrects,
+  meterQuestion,
+  meterReplaced,
+  onMeterReplaced,
 }: {
-  pending: ReadingValues | null
-  expected: { value: number; label: string } | null
-  onCancel: () => void
-  onConfirm: (values: ReadingValues) => void
+  before: Before | null
+  corrects: boolean
+  meterQuestion: boolean
+  meterReplaced: boolean
+  onMeterReplaced: (value: boolean) => void
 }) {
-  return (
-    <AlertDialog
-      open={pending !== null}
-      onOpenChange={(open) => !open && onCancel()}
-    >
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle className="text-xl">
-            Confira a leitura anterior
-          </AlertDialogTitle>
-          <AlertDialogDescription asChild>
-            <div className="space-y-2 text-base">
-              <p>
-                A leitura anterior digitada (
-                <strong className="text-foreground tabular-nums">
-                  {formatNumber(pending?.previousReading ?? 0)}
-                </strong>
-                ) é diferente da leitura de {expected?.label} (
-                <strong className="text-foreground tabular-nums">
-                  {formatNumber(expected?.value ?? 0)}
-                </strong>
-                ).
-              </p>
-              <p>
-                Isso só acontece quando o hidrômetro é trocado ou zerado. Um
-                número errado aqui aumenta muito a conta.
-              </p>
-            </div>
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Voltar e corrigir</AlertDialogCancel>
-          <AlertDialogAction
-            onClick={() =>
-              pending && onConfirm({ ...pending, confirmPreviousChange: true })
-            }
-          >
-            Salvar mesmo assim
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-  )
-}
-
-function MonthSelect({
-  value,
-  onChange,
-  ...props
-}: {
-  value: string
-  onChange: (value: string) => void
-} & Omit<React.ComponentProps<'select'>, 'value' | 'onChange' | 'size'>) {
-  return (
-    <NativeSelect
-      {...props}
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-    >
-      {MONTH_NAMES.map((name, index) => (
-        <NativeSelectOption key={name} value={index + 1}>
-          {name}
-        </NativeSelectOption>
-      ))}
-    </NativeSelect>
-  )
+  const id = useId()
+  if (meterQuestion) {
+    return (
+      <div className="mt-1 flex items-center gap-2">
+        <Checkbox
+          id={id}
+          checked={meterReplaced}
+          onCheckedChange={(checked) => onMeterReplaced(checked === true)}
+        />
+        <Label htmlFor={id} className="text-sm font-normal">
+          Hidrômetro trocado
+        </Label>
+      </div>
+    )
+  }
+  if (corrects && before) {
+    return (
+      <p className="mt-1 text-sm font-semibold text-primary">
+        Corrige também a leitura de {formatDateRange(before)} (era{' '}
+        {formatNumber(before.currentReading)}).
+      </p>
+    )
+  }
+  return null
 }
 
 function StatusSelect({
   value,
   onChange,
+  canPay,
   ...props
 }: {
   value: ReadingDraft['status']
   onChange: (value: ReadingDraft['status']) => void
+  /** Without the period's electricity bill there is nothing to pay yet. */
+  canPay: boolean
 } & Omit<React.ComponentProps<'select'>, 'value' | 'onChange' | 'size'>) {
   return (
     <NativeSelect
       {...props}
-      value={value}
+      value={canPay ? value : 'pendente'}
+      disabled={!canPay || props.disabled}
+      title={
+        canPay
+          ? undefined
+          : 'A conta de energia do período ainda não foi informada.'
+      }
       onChange={(event) =>
         onChange(event.target.value as ReadingDraft['status'])
       }
@@ -293,21 +250,26 @@ function StatusSelect({
 }
 
 /**
- * One spreadsheet row in edit mode: the same columns as the table, with the
- * computed ones (consumo, custo, total) updating while typing.
+ * One row of the chácara's spreadsheet in edit mode. The dates, "Última
+ * leitura" and "Leitura atual" can change; the value comes from splitting
+ * the period's electricity bill, so it is recalculated when saving.
  */
 export function ReadingEditorRow({
   initial,
   label,
-  expectedPrevious,
+  before,
+  linked,
+  canPay,
   pending,
   onSubmit,
   onCancel,
 }: {
   initial: ReadingDraft
-  /** Describes the row for screen readers, e.g. "Outubro de 2026". */
+  /** Describes the row for screen readers, e.g. "10/09/2026 a 10/10/2026". */
   label: string
-  expectedPrevious: ExpectedPrevious
+  before: Before | null
+  linked: boolean
+  canPay: boolean
   pending: boolean
   onSubmit: (values: ReadingValues) => Promise<boolean>
   onCancel: () => void
@@ -316,24 +278,21 @@ export function ReadingEditorRow({
     draft,
     set,
     digits,
-    bill,
+    consumption,
     invalidField,
     validate,
-    expected,
-    offChain,
-  } = useReadingDraft(initial, expectedPrevious, true)
-  const [confirming, setConfirming] = useState<ReadingValues | null>(null)
+    corrects,
+    meterQuestion,
+  } = useReadingDraft(initial, before, linked)
 
   async function submit() {
     const values = validate()
-    if (!values) return
-    if (offChain) setConfirming(values)
-    else await onSubmit(values)
+    if (values) await onSubmit(values)
   }
 
   return (
     <TableRow
-      className="bg-secondary/60 hover:bg-secondary/60"
+      className="bg-secondary/60 align-top hover:bg-secondary/60"
       onKeyDown={(event) => {
         if (event.key === 'Enter' && event.target instanceof HTMLInputElement) {
           event.preventDefault()
@@ -343,18 +302,36 @@ export function ReadingEditorRow({
       }}
     >
       <TableCell>
-        <Input
-          {...digits('year')}
-          aria-label={`Ano (${label})`}
-          maxLength={4}
-          className="w-[4.5rem] tabular-nums"
-        />
+        <div className="flex flex-col gap-1">
+          <DateInput
+            aria-label={`Data da última leitura (${label})`}
+            aria-invalid={invalidField === 'start'}
+            className="w-[8.5rem]"
+            value={draft.start}
+            onChange={(value) => set('start', value)}
+          />
+          <DateInput
+            aria-label={`Data da leitura (${label})`}
+            aria-invalid={invalidField === 'end'}
+            className="w-[8.5rem]"
+            value={draft.end}
+            onChange={(value) => set('end', value)}
+          />
+        </div>
       </TableCell>
       <TableCell>
-        <MonthSelect
-          aria-label={`Mês (${label})`}
-          value={draft.month}
-          onChange={(value) => set('month', value)}
+        <Input
+          {...digits('previous')}
+          aria-label={`Última leitura (${label})`}
+          maxLength={9}
+          className="w-[6.5rem] text-right tabular-nums"
+        />
+        <ChainNote
+          before={before}
+          corrects={corrects}
+          meterQuestion={meterQuestion}
+          meterReplaced={draft.meterReplaced}
+          onMeterReplaced={(value) => set('meterReplaced', value)}
         />
       </TableCell>
       <TableCell>
@@ -365,62 +342,19 @@ export function ReadingEditorRow({
           className="w-[6.5rem] text-right tabular-nums"
         />
       </TableCell>
-      <TableCell>
-        <Input
-          {...digits('previous')}
-          aria-label={`Leitura anterior (${label})`}
-          title={
-            offChain && expected
-              ? `Diferente de ${expected.label} (${formatNumber(expected.value)})`
-              : undefined
-          }
-          maxLength={9}
-          className={cn(
-            'w-[6.5rem] text-right tabular-nums',
-            offChain && 'border-pending ring-2 ring-pending/30',
-          )}
-        />
-        <ChainConfirmDialog
-          pending={confirming}
-          expected={expected}
-          onCancel={() => setConfirming(null)}
-          onConfirm={(values) => {
-            setConfirming(null)
-            void onSubmit(values)
-          }}
-        />
-      </TableCell>
       <TableCell className="text-right tabular-nums">
-        {bill ? formatNumber(bill.consumption) : '—'}
+        {consumption === null ? '—' : formatNumber(consumption)}
       </TableCell>
-      <TableCell>
-        <MoneyInput
-          kind="price"
-          aria-label={`Preço do kWh (${label})`}
-          aria-invalid={invalidField === 'price'}
-          className="w-[7.5rem]"
-          value={draft.price}
-          onChange={(value) => set('price', value)}
-        />
-      </TableCell>
-      <TableCell className="text-right tabular-nums">
-        {bill ? formatBRL(bill.energyCents) : '—'}
-      </TableCell>
-      <TableCell>
-        <MoneyInput
-          aria-label={`Fundo de reserva (${label})`}
-          aria-invalid={invalidField === 'fund'}
-          className="w-[7rem]"
-          value={draft.fund}
-          onChange={(value) => set('fund', value)}
-        />
-      </TableCell>
-      <TableCell className="text-right font-bold tabular-nums">
-        {bill ? formatBRL(bill.totalCents) : '—'}
+      <TableCell
+        colSpan={3}
+        className="text-center whitespace-normal text-muted-foreground"
+      >
+        Recalculado ao salvar, pela divisão da conta do período.
       </TableCell>
       <TableCell>
         <StatusSelect
           aria-label={`Situação (${label})`}
+          canPay={canPay}
           value={draft.status}
           onChange={(value) => set('status', value)}
         />
@@ -446,40 +380,72 @@ export function ReadingEditorRow({
   )
 }
 
+/** A period this chácara has no reading in yet. */
+export type OpenPeriod = DateRange & {
+  id: number
+  energyBillCents: number | null
+  /** The chácara's reading before the period, if any. */
+  before: Before | null
+}
+
+/** What the form starts with for a period: dates and última leitura. */
+function draftFor(period: OpenPeriod): ReadingDraft {
+  return toDraft({
+    startDate: period.before?.endDate ?? period.startDate,
+    endDate: period.endDate,
+    previousReading: period.before?.currentReading ?? null,
+    currentReading: null,
+    paid: false,
+  })
+}
+
 /**
- * "Nova leitura" below the spreadsheet: the same fields as a row, with
- * labels, and the bill calculated while typing.
+ * "Nova leitura" below the spreadsheet: a period without a reading of this
+ * chácara, with "Última leitura" from the reading before it.
  */
 export function NewReadingForm({
-  initial,
-  expectedPrevious,
+  periods,
+  initialPeriodId,
   pending,
   onSubmit,
 }: {
-  initial: ReadingDraft
-  expectedPrevious: ExpectedPrevious
+  periods: OpenPeriod[]
+  initialPeriodId: number
   pending: boolean
-  onSubmit: (values: ReadingValues) => Promise<boolean>
+  onSubmit: (periodId: number, values: ReadingValues) => Promise<boolean>
 }) {
+  const [periodId, setPeriodId] = useState(initialPeriodId)
+  const period = periods.find((option) => option.id === periodId) ?? periods[0]
+  const before = period?.before ?? null
   const {
     draft,
     set,
+    setDraft,
     digits,
-    bill,
-    parsed,
+    consumption,
     invalidField,
     validate,
-    expected,
-    offChain,
-  } = useReadingDraft(initial, expectedPrevious, false)
-  const [confirming, setConfirming] = useState<ReadingValues | null>(null)
+    corrects,
+    meterQuestion,
+  } = useReadingDraft(
+    period
+      ? draftFor(period)
+      : toDraft({
+          startDate: '',
+          endDate: '',
+          previousReading: null,
+          currentReading: null,
+          paid: false,
+        }),
+    before,
+    true,
+  )
 
   async function submit(event: FormEvent) {
     event.preventDefault()
+    if (!period) return
     const values = validate()
-    if (!values) return
-    if (offChain) setConfirming(values)
-    else await onSubmit(values)
+    if (values) await onSubmit(period.id, values)
   }
 
   return (
@@ -489,37 +455,70 @@ export function NewReadingForm({
           <CardTitle className="text-xl">Nova leitura</CardTitle>
         </CardHeader>
         <CardContent>
-          <FieldGroup className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-7">
-            <FormField label="Ano">
+          <FieldGroup className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-7">
+            <FormField
+              label="Período"
+              className="col-span-2 sm:col-span-3 lg:col-span-2"
+            >
               {(props) => (
-                <Input
+                <NativeSelect
                   {...props}
-                  {...digits('year')}
-                  maxLength={4}
                   className="tabular-nums"
+                  value={period?.id ?? ''}
+                  onChange={(event) => {
+                    const next = periods.find(
+                      (option) => option.id === Number(event.target.value),
+                    )
+                    if (!next) return
+                    setPeriodId(next.id)
+                    setDraft(draftFor(next))
+                  }}
+                >
+                  {periods.map((option) => (
+                    <NativeSelectOption key={option.id} value={option.id}>
+                      {formatDateRange(option)}
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+              )}
+            </FormField>
+            <FormField label="Última leitura em">
+              {(props) => (
+                <DateInput
+                  {...props}
+                  aria-invalid={invalidField === 'start'}
+                  value={draft.start}
+                  onChange={(value) => set('start', value)}
                 />
               )}
             </FormField>
-            <FormField label="Mês">
+            <FormField label="Leitura atual em">
               {(props) => (
-                <MonthSelect
+                <DateInput
                   {...props}
-                  value={draft.month}
-                  onChange={(value) => set('month', value)}
+                  aria-invalid={invalidField === 'end'}
+                  value={draft.end}
+                  onChange={(value) => set('end', value)}
                 />
               )}
             </FormField>
-            <FormField label="Leitura anterior">
+            <FormField label="Última leitura">
               {(props) => (
-                <Input
-                  {...props}
-                  {...digits('previous')}
-                  maxLength={9}
-                  className={cn(
-                    'text-right tabular-nums',
-                    offChain && 'border-pending ring-2 ring-pending/30',
-                  )}
-                />
+                <div>
+                  <Input
+                    {...props}
+                    {...digits('previous')}
+                    maxLength={9}
+                    className="text-right tabular-nums"
+                  />
+                  <ChainNote
+                    before={before}
+                    corrects={corrects}
+                    meterQuestion={meterQuestion}
+                    meterReplaced={draft.meterReplaced}
+                    onMeterReplaced={(value) => set('meterReplaced', value)}
+                  />
+                </div>
               )}
             </FormField>
             <FormField label="Leitura atual">
@@ -533,31 +532,11 @@ export function NewReadingForm({
                 />
               )}
             </FormField>
-            <FormField label="Preço kWh">
-              {(props) => (
-                <MoneyInput
-                  {...props}
-                  kind="price"
-                  aria-invalid={invalidField === 'price'}
-                  value={draft.price}
-                  onChange={(value) => set('price', value)}
-                />
-              )}
-            </FormField>
-            <FormField label="Fundo reserva">
-              {(props) => (
-                <MoneyInput
-                  {...props}
-                  aria-invalid={invalidField === 'fund'}
-                  value={draft.fund}
-                  onChange={(value) => set('fund', value)}
-                />
-              )}
-            </FormField>
             <FormField label="Situação">
               {(props) => (
                 <StatusSelect
                   {...props}
+                  canPay={period?.energyBillCents != null}
                   value={draft.status}
                   onChange={(value) => set('status', value)}
                 />
@@ -566,43 +545,25 @@ export function NewReadingForm({
           </FieldGroup>
         </CardContent>
         <CardFooter className="flex flex-wrap items-center justify-between gap-4">
-          {offChain && expected && (
-            <p className="basis-full font-semibold text-pending">
-              A leitura anterior está diferente da leitura de {expected.label} (
-              {formatNumber(expected.value)}). Só mude se o hidrômetro foi
-              trocado.
-            </p>
-          )}
           <p className="text-muted-foreground tabular-nums" aria-live="polite">
-            {bill && 'values' in parsed ? (
+            {consumption !== null ? (
               <>
-                {formatNumber(bill.consumption)} kWh ×{' '}
-                {formatKwhPrice(parsed.values.kwhPriceMicros)} ={' '}
-                {formatBRL(bill.energyCents)}, mais fundo de{' '}
-                {formatBRL(bill.reserveFundCents)}:{' '}
                 <strong className="text-lg text-foreground">
-                  {formatBRL(bill.totalCents)}
-                </strong>
+                  {formatNumber(consumption)} m³
+                </strong>{' '}
+                de água. O valor sai da divisão da conta de energia do período e
+                é calculado ao salvar.
               </>
             ) : (
-              'Digite a leitura atual para ver o valor.'
+              'Digite a leitura atual para ver o consumo.'
             )}
           </p>
-          <Button type="submit" size="lg" disabled={pending}>
+          <Button type="submit" size="lg" disabled={pending || !period}>
             <Check aria-hidden="true" />
             {pending ? 'Salvando…' : 'Adicionar leitura'}
           </Button>
         </CardFooter>
       </form>
-      <ChainConfirmDialog
-        pending={confirming}
-        expected={expected}
-        onCancel={() => setConfirming(null)}
-        onConfirm={(values) => {
-          setConfirming(null)
-          void onSubmit(values)
-        }}
-      />
     </Card>
   )
 }

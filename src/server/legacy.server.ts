@@ -16,9 +16,16 @@ import { eq } from 'drizzle-orm'
 import { unzipSync } from 'fflate'
 import Papa from 'papaparse'
 import type { Executor } from '#/db/client.server'
-import { monthRates, owners, properties, readings } from '#/db/schema'
+import { owners, type Period, periods, properties, readings } from '#/db/schema'
 import { UserFacingError } from '#/lib/errors'
-import { formatPeriod, type Period, periodKey } from '#/lib/periods'
+import {
+  addMonthsToDate,
+  type DateRange,
+  formatDateRange,
+  formatMonthYear,
+  isISODate,
+  rangesOverlap,
+} from '#/lib/periods'
 import { deleteAllData } from './data.server'
 
 const MONTHS: Record<string, number> = {
@@ -37,32 +44,62 @@ const MONTHS: Record<string, number> = {
   dez: 12,
 }
 
+const pad = (value: number) => String(value).padStart(2, '0')
+
+/** A day of a month, moved into the month when it doesn't exist (31/02). */
+function dateOf(year: number, month: number, day: number): string {
+  for (let candidate = day; candidate > 0; candidate--) {
+    const iso = `${year}-${pad(month)}-${pad(candidate)}`
+    if (isISODate(iso)) return iso
+  }
+  return `${year}-${pad(month)}-01`
+}
+
 /**
- * The old "Mes" column describes the reading period, e.g. "10 Jan/10 Fev
- * 2007" or "10 Nov 07 / 10 Jan 08". The bill belongs to the month the
- * period ends in (when the meter was read).
+ * The old "Mes" column holds the reading period, e.g. "10 Jan/10 Fev 2007"
+ * or "10 Nov 07 / 10 Jan 08". The start's year, when missing, is the end's
+ * (or the year before, for "10 Dez / 10 Jan 2009"); a missing day is the
+ * 10th, when the meters were read; a missing start is a month earlier.
  */
 export function parseLegacyPeriod(
   mes: string,
   fallbackYear: number | null,
-): Period | null {
+): DateRange | null {
   const pattern =
-    /(jan|fev|mar|abr|mai|jun|jul|lul|ago|set|out|nov|dez)[a-zç]*\.?\s*(\d{4}|\d{2}(?!\d))?/gi
-  const matches = [...mes.matchAll(pattern)]
-  const last = matches.at(-1)
-  if (!last?.[1]) return null
+    /(?:(\d{1,2})\s*)?(jan|fev|mar|abr|mai|jun|jul|lul|ago|set|out|nov|dez)[a-zç]*\.?\s*(\d{4}|\d{2}(?!\d))?/gi
+  const dates = [...mes.matchAll(pattern)].flatMap((match) => {
+    const month = MONTHS[match[2]?.toLowerCase() ?? '']
+    if (!month) return []
+    const year = match[3]
+      ? match[3].length === 2
+        ? 2000 + Number(match[3])
+        : Number(match[3])
+      : null
+    return [{ day: Number(match[1] ?? 10) || 10, month, year }]
+  })
+  const end = dates.at(-1)
+  if (!end) return null
 
-  const month = MONTHS[last[1].toLowerCase()]
-  if (!month) return null
+  const endYear =
+    end.year ?? (Number(mes.match(/\d{4}/g)?.at(-1)) || fallbackYear)
+  if (!endYear) return null
+  const endDate = dateOf(endYear, end.month, end.day)
 
-  let year: number | null = null
-  if (last[2]) {
-    year = last[2].length === 2 ? 2000 + Number(last[2]) : Number(last[2])
-  } else {
-    const fourDigits = mes.match(/\d{4}/g)?.at(-1)
-    year = fourDigits ? Number(fourDigits) : fallbackYear
+  const start = dates.length > 1 ? dates[0] : undefined
+  const startDate = start
+    ? dateOf(
+        start.year ?? (start.month > end.month ? endYear - 1 : endYear),
+        start.month,
+        start.day,
+      )
+    : null
+  return {
+    startDate:
+      startDate && startDate < endDate
+        ? startDate
+        : addMonthsToDate(endDate, -1),
+    endDate,
   }
-  return year ? { year, month } : null
 }
 
 /** "02/15/07 00:00:00" (Access export, month first) → "2007-02-15". */
@@ -77,6 +114,14 @@ export function parseLegacyDate(value: string | undefined): string | null {
 /** "0.34999999" (Access Single) → 350000 micros, rounded to 4 decimals. */
 export function legacyPriceToMicros(value: string): number {
   return Math.round(Number(value) * 10_000) * 100
+}
+
+/**
+ * What the old app charged for energy: m³ × its price per m³, rounded half
+ * up to the centavo.
+ */
+export function legacyEnergyCents(consumption: number, priceMicros: number) {
+  return Math.floor((Math.max(consumption, 0) * priceMicros + 5_000) / 10_000)
 }
 
 /** "10" → 1000 centavos. */
@@ -289,23 +334,28 @@ export function chacarasInApp(db: Executor) {
   }
 }
 
-/** Identifies a chácara's month in `monthsInApp`. */
-export const chacaraMonth = (propertyId: number, period: Period) =>
-  `${propertyId}:${periodKey(period)}`
+/** Identifies a chácara's period in `readingsInApp`. */
+export const chacaraPeriod = (propertyId: number, periodId: number) =>
+  `${propertyId}:${periodId}`
 
-/** The months each chácara already has a reading for. */
-export function monthsInApp(db: Executor): Set<string> {
+/** The periods each chácara already has a reading in. */
+export function readingsInApp(db: Executor): Set<string> {
   return new Set(
     db
-      .select({
-        propertyId: readings.propertyId,
-        year: readings.year,
-        month: readings.month,
-      })
+      .select({ propertyId: readings.propertyId, periodId: readings.periodId })
       .from(readings)
       .all()
-      .map((reading) => chacaraMonth(reading.propertyId, reading)),
+      .map((reading) => chacaraPeriod(reading.propertyId, reading.periodId)),
   )
+}
+
+/** The value most rows have (ties: the largest). */
+function mostCommon<T extends string | number>(values: T[]): T | undefined {
+  const counts = new Map<T, number>()
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1)
+  return [...counts.entries()].sort(
+    (a, b) => b[1] - a[1] || (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0),
+  )[0]?.[0]
 }
 
 export type LegacyImportResult = {
@@ -321,14 +371,32 @@ export type LegacyImportResult = {
   skipped: string[]
 }
 
+/** A row of T_Cosumo ready to become a reading. */
+type LegacyReading = {
+  label: string
+  property: Place
+  range: DateRange
+  previousReading: number
+  currentReading: number
+  energyCents: number
+  reserveFundCents: number
+  paid: boolean
+  notes: string
+}
+
 /**
  * Brings the old app's data in without changing what is already there, so
- * it can run again, also after months typed in the new app. An old user
+ * it can run again, also after periods typed in the new app. An old user
  * whose chácara is in the app (imported before, or with the same name or
- * meter) keeps it; the others become a proprietário and a chácara. Each row
- * of T_Cosumo becomes the reading of a month the chácara doesn't have yet,
- * with the kWh price and reserve fund it was billed with. `reset` first
- * deletes all the data (not the password).
+ * meter) keeps it; the others become a proprietário and a chácara.
+ *
+ * The rows of T_Cosumo are grouped by the month their period ends in: each
+ * group is a period (the dates most of them have, starting no earlier than
+ * the period before ends) whose electricity bill is what the old app charged
+ * for energy. A chácara read on other dates keeps them. A period of the app
+ * ending in that month gets the readings the chácaras lack there. Every
+ * reading keeps what it was charged. `reset` first deletes all the data
+ * (not the password).
  */
 export function importLegacy(
   db: Executor,
@@ -410,12 +478,9 @@ export function importLegacy(
       ]),
     )
 
-    // Months each chácara already has: those stay as they are.
-    const taken = monthsInApp(tx)
-    const seen = new Set<string>()
-    // How many readings of each month used each price/fund pair.
-    const ratesByMonth = new Map<string, Map<string, number>>()
-
+    // The rows, by the month their period ends in.
+    const groups = new Map<string, LegacyReading[]>()
+    const seen = new Map<string, string>()
     for (const row of consumption) {
       const label = `registro ${row.CodigoCosumo}`
       const userCode = userByInvoice.get(String(row.NumeroFatura))
@@ -430,24 +495,21 @@ export function importLegacy(
         continue
       }
       const readingDate = parseLegacyDate(row.Data)
-      const period = parseLegacyPeriod(
+      const range = parseLegacyPeriod(
         row.Mes ?? '',
         Number(row.Ano) || Number(readingDate?.slice(0, 4)) || null,
       )
-      if (!period) {
+      if (!range) {
         skipped.push(`${label}: período "${row.Mes}" não reconhecido`)
         continue
       }
-      const key = chacaraMonth(property.id, period)
-      if (seen.has(key)) {
+      const month = range.endDate.slice(0, 7)
+      const key = `${property.id}:${month}`
+      const already = seen.get(key)
+      if (already) {
         skipped.push(
-          `${label}: ${property.name} já tem leitura de ${formatPeriod(period)}`,
+          `${label}: ${property.name} já tem leitura no período de ${already}`,
         )
-        continue
-      }
-      if (taken.has(key)) {
-        seen.add(key)
-        existing++
         continue
       }
       const previousReading = Number(row.LeituraAnterior)
@@ -456,49 +518,114 @@ export function importLegacy(
         skipped.push(`${label}: leitura atual menor que a anterior`)
         continue
       }
-      seen.add(key)
-
-      const price = legacyPriceToMicros(row.Valor ?? '0')
-      const fund = legacyMoneyToCents(row.Fundo ?? '0')
-      tx.insert(readings)
-        .values({
-          propertyId: property.id,
-          ...period,
-          previousReading,
-          currentReading,
-          kwhPriceMicros: price,
-          reserveFundCents: fund,
-          paid: row.Quitado === '1',
-          readingDate,
-          notes: [
-            `Período no sistema antigo: ${row.Mes?.trim()}`,
-            row.Vencimento?.trim() && `vencimento ${row.Vencimento.trim()}`,
-          ]
-            .filter(Boolean)
-            .join(', '),
-        })
-        .run()
-      imported++
-
-      const monthKey = periodKey(period)
-      const counts = ratesByMonth.get(monthKey) ?? new Map<string, number>()
-      const pair = `${price}:${fund}`
-      counts.set(pair, (counts.get(pair) ?? 0) + 1)
-      ratesByMonth.set(monthKey, counts)
+      seen.set(key, formatDateRange(range))
+      const group = groups.get(month) ?? []
+      group.push({
+        label,
+        property,
+        range,
+        previousReading,
+        currentReading,
+        energyCents: legacyEnergyCents(
+          currentReading - previousReading,
+          legacyPriceToMicros(row.Valor ?? '0'),
+        ),
+        reserveFundCents: legacyMoneyToCents(row.Fundo ?? '0'),
+        paid: row.Quitado === '1',
+        notes: [
+          `Período no sistema antigo: ${row.Mes?.trim()}`,
+          row.Vencimento?.trim() && `vencimento ${row.Vencimento.trim()}`,
+        ]
+          .filter(Boolean)
+          .join(', '),
+      })
+      groups.set(month, group)
     }
 
-    // Each month's values are the ones most of its readings were billed with;
-    // the next month typed in the new app starts from the last of them.
-    // Months that already have values keep them.
-    for (const [monthKey, counts] of ratesByMonth) {
-      const [year, month] = monthKey.split('-').map(Number)
-      const [pair] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0] ?? []
-      const [price, fund] = (pair ?? '').split(':').map(Number)
-      if (!year || !month || price === undefined || fund === undefined) continue
-      tx.insert(monthRates)
-        .values({ year, month, kwhPriceMicros: price, reserveFundCents: fund })
-        .onConflictDoNothing()
-        .run()
+    // Periods each chácara already has a reading in: those stay as they are.
+    const taken = readingsInApp(tx)
+    const appPeriods: Period[] = tx.select().from(periods).all()
+    let previousEnd: string | null = null
+
+    for (const [month, rows] of [...groups.entries()].sort((a, b) =>
+      a[0].localeCompare(b[0]),
+    )) {
+      const endDate =
+        mostCommon(rows.map((row) => row.range.endDate)) ??
+        rows[0]?.range.endDate
+      const commonStart =
+        mostCommon(rows.map((row) => row.range.startDate)) ??
+        rows[0]?.range.startDate
+      if (!endDate || !commonStart) continue
+      let startDate: string =
+        previousEnd && previousEnd > commonStart ? previousEnd : commonStart
+      if (startDate >= endDate) startDate = addMonthsToDate(endDate, -1)
+
+      const sameMonth = appPeriods.filter(
+        (period) => period.endDate.slice(0, 7) === month,
+      )
+      let period: Period | undefined
+      if (sameMonth.length > 1) {
+        skipped.push(
+          `${rows.length} leituras de ${formatMonthYear(endDate)}: o app tem mais de um período terminando nesse mês; elas não foram importadas`,
+        )
+        continue
+      }
+      if (sameMonth[0]) {
+        period = sameMonth[0]
+      } else {
+        const range: DateRange = { startDate, endDate }
+        const clash = appPeriods.find((other) => rangesOverlap(other, range))
+        if (clash) {
+          skipped.push(
+            `${rows.length} leituras de ${formatDateRange(range)}: o app tem o período de ${formatDateRange(clash)} nessas datas; elas não foram importadas`,
+          )
+          continue
+        }
+        period = tx
+          .insert(periods)
+          .values({
+            ...range,
+            energyBillCents: rows.reduce(
+              (sum, row) => sum + row.energyCents,
+              0,
+            ),
+            reserveFundCents:
+              mostCommon(rows.map((row) => row.reserveFundCents)) ?? 0,
+          })
+          .returning()
+          .get()
+        appPeriods.push(period)
+      }
+      previousEnd = period.endDate
+
+      for (const row of rows) {
+        const key = chacaraPeriod(row.property.id, period.id)
+        if (taken.has(key)) {
+          existing++
+          continue
+        }
+        taken.add(key)
+        tx.insert(readings)
+          .values({
+            propertyId: row.property.id,
+            periodId: period.id,
+            previousReading: row.previousReading,
+            currentReading: row.currentReading,
+            startDate:
+              row.range.startDate === period.startDate
+                ? null
+                : row.range.startDate,
+            endDate:
+              row.range.endDate === period.endDate ? null : row.range.endDate,
+            energyCents: row.energyCents,
+            reserveFundCents: row.reserveFundCents,
+            paid: row.paid,
+            notes: row.notes,
+          })
+          .run()
+        imported++
+      }
     }
   })
 

@@ -7,9 +7,9 @@
  *   bun run db:import-legacy <folder-with-csvs> --reset   # wipes data first
  *
  * Each old "usuário" becomes a proprietário and a chácara, unless that
- * chácara is already in the app; each row of T_Cosumo becomes a monthly
- * reading, keeping the kWh price and reserve fund it was billed with.
- * Months that already have a reading are kept as they are (see
+ * chácara is already in the app; each row of T_Cosumo becomes a reading in
+ * the period of its dates, keeping what it was charged. Periods where a
+ * chácara already has a reading keep it as it is (see
  * src/server/legacy.server.ts).
  */
 import { openDatabase } from '#/db/client.server'

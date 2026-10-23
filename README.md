@@ -1,7 +1,8 @@
 # Rateio da Água
 
-Web app to record the monthly meter readings of a group of chácaras and split
-the electricity cost of the shared water pump. It replaces the old Microsoft
+Web app to record the water meter readings (m³) of a group of chácaras and
+split the electricity bill of the shared water pump among them, by the water
+each one used. It replaces the old Microsoft
 Access 2009 app (`Kw.mdb`). The interface is in Portuguese (pt-BR) and is
 designed for people who are not used to computers: large type, one obvious
 action per screen, and plain words.
@@ -10,24 +11,29 @@ action per screen, and plain words.
 
 | Screen | What for |
 | --- | --- |
-| **Leituras** (home) | Pick the month with the arrows or the month and year dropdowns. Set the month's kWh price and reserve fund (each month has its own; a calculator, always open, derives the kWh price from the pump's electricity bill), then type the reading of every chácara, like on the meter's counter. Consumption and bill (kWh × price + reserve fund) are calculated as you type, from the previous month's reading; only a chácara's first reading asks for the previous one. Mark bills as paid. |
-| **Chácara** (`/chacaras/:id`) | The spreadsheet of one chácara from the requirements: Ano, Mês, Leitura Atual, Leitura Anterior, Consumo, Preço kWh, Custo Energia, Fundo Reserva, Total, Status. Correct or delete rows, add readings. |
+| **Leituras** (home) | Pick the billing period (DD/MM/AAAA to DD/MM/AAAA) with the arrows or the dropdown; "Novo período" starts the next one where the last one ended. Set the period's dates (they apply to every chácara), the pump's electricity bill (can wait until it arrives) and the reserve fund, then type each chácara's reading in m³, like on the meter's counter. "Última leitura" comes from the chácara's previous reading; correcting it corrects that reading too. A chácara read on other days gets its own dates ("Datas diferentes?"). The bill is split as you type: each chácara pays its share by m³ plus the fund. Mark bills as paid. |
+| **Chácara** (`/chacaras/:id`) | The spreadsheet of one chácara: Período, Última leitura, Leitura atual, Consumo (m³), Energia, Fundo reserva, Total, Situação. Correct or delete rows, add readings in periods it lacks. |
 | **Histórico** | Every bill with filters (chácara, year, paid/pending) and a CSV export that opens in Excel. |
-| **Gráficos** | Energy cost per month (by chácara), consumption per chácara and payments per month, each with a table view. |
-| **Relatórios** | Monthly bill per chácara (owner, property, reading, calculation, bank details and a **Pix QR code with the amount**, plus a WhatsApp message) and the annual report per owner. Both print or save as PDF. |
+| **Gráficos** | Energy cost per period (by chácara), water used per chácara and payments per period, each with a table view. |
+| **Relatórios** | "Cobranças do período": the bill of each chácara (owner, property, reading, how the electricity bill was split, bank details and a **Pix QR code with the amount**, plus a WhatsApp message), and the annual report per owner. Both print or save as PDF. |
 | **Cadastros** | Owners (name, document, contact, e-mail) and chácaras (name, address with CEP lookup, meter number, owner). Search by any field. |
 | **Configurações** | "Cobranças" (group name and due day), "Dados Bancários" (bank, branch, account, type, Pix key), "Senha de acesso" (the password that unlocks the app, see [Password](#password)) and a database backup download. Unlocked with `APP_PASSWORD`, also "Importar dados" (a backup or the old Access data, see [Backup and restore](#backup-and-restore) and [Importing the old Access data](#importing-the-old-access-data)) and "Apagar todos os dados". |
 
 Safety nets for non-technical users:
 
-- Readings lower than the previous one are rejected, and readings far above
+- Readings lower than the última leitura are rejected, and readings far above
   the chácara's recent average ask for confirmation (catches an extra digit).
 - Leaving the readings screen with unsaved values asks first.
-- Correcting a month also fixes the "leitura anterior" of the following month.
-- Each month has its own kWh price and reserve fund, and each reading keeps
-  the values it was billed with. Changing a month's values re-prices only that
-  month's unpaid bills; paid bills never change. A new month starts with the
-  previous month's values.
+- A chácara's readings are a chain: correcting "Última leitura" corrects the
+  reading before it, correcting "Leitura atual" corrects the next one's
+  "Última leitura", and the same goes for their dates. An "Última leitura"
+  lower than the reading before can only be a new meter: the screen asks
+  ("Hidrômetro trocado"), and then the reading before stays as it is.
+- Periods never overlap (one may start on the day the other ends); moving a
+  period's date moves the neighbour that touches it.
+- Unpaid bills follow every change in their period (bill, fund, readings);
+  paid bills keep what was charged. A new period starts with the previous
+  period's reserve fund.
 
 ## Stack
 
@@ -43,7 +49,7 @@ Safety nets for non-technical users:
 
 ```bash
 bun install
-bun run db:seed    # optional: fictitious chácaras and 18 months of readings
+bun run db:seed    # optional: fictitious chácaras and 18 monthly periods
 bun run dev        # http://localhost:3000
 ```
 
@@ -94,17 +100,19 @@ files, like `Kw.mdb`, are ignored). CSVs saved as Windows-1252 instead of
 UTF-8 work too.
 
 Each old user becomes an owner and a chácara (the chácara number is taken from
-the old address column), and each consumption row becomes a reading with the
-price and fund it was billed with. The billing month is the month the reading
-period ends in ("10 Nov 07 / 10 Jan 08" → January 2008). Rows without readings
-are skipped and listed. Each month's kWh price and reserve fund are the values
-most used in that month's bills.
+the old address column), and each consumption row becomes a reading that
+keeps what it was charged (m³ × the old price per m³, plus the fund). Rows are
+grouped into periods by the month their dates end in ("10 Nov 07 / 10 Jan 08"
+→ the period ending on 10/01/2008); a period's electricity bill is what its
+readings charged for energy, and a chácara read on other dates ("10 Set 08 /
+10 Dez 08") keeps them. Rows without readings are skipped and listed.
 
 Importing again, or into a database that already has data, only adds what is
 missing, and nothing already there changes. An old user whose chácara is
 already in the app keeps it: imported before (the owner's notes keep the old
-code), or with the same name or meter number. Months that already have a
-reading keep it. A name or meter shared by two chácaras in the app is
+code), or with the same name or meter number. A period of the app ending in
+the same month is the same period, and a chácara that already has a reading
+in it keeps it. A name or meter shared by two chácaras in the app is
 reported instead of guessed. `--reset` wipes the data first, like
 **Apagar todos os dados** in the app; the password stays.
 
@@ -218,12 +226,14 @@ it was in the copy, with the same record numbers in the addresses
 
 Without wiping first, **Importar dados** only adds what the app doesn't have
 yet, like the old Access data: a chácara with the same name or meter is the
-same chácara and only gets the months it lacks (its owner and readings stay as
-they are), a new chácara's owner is the proprietário with the same name if
-there is one, and "Cobranças", "Dados Bancários" and each month's kWh price and
-reserve fund come only when the app has none. A copy made by an older version
-of the app is brought up to date with the migrations on the way in; one made by
-a newer version is refused.
+same chácara and only gets the periods it lacks (its owner and readings stay
+as they are), a new chácara's owner is the proprietário with the same name if
+there is one, a period with the same dates is the same period (one whose dates
+overlap a period of the app is left out and reported), and "Cobranças" and
+"Dados Bancários" come only when the app has none. A copy made by an older
+version of the app is brought up to date with the migrations on the way in
+(copies made by month become periods, see below); one made by a newer version
+is refused.
 
 Or, with the server stopped, replace `data/rateio.sqlite` with the downloaded
 file (delete any `-wal`/`-shm` files next to it). That also brings back the
@@ -282,13 +292,32 @@ src/
 
 ## Business rules
 
-- **Consumo** = leitura atual − leitura anterior (kWh).
-- **Custo energia** = consumo × preço do kWh, rounded half-up to the centavo.
-- **Total** = custo energia + fundo reserva.
-- Money is stored as integers: centavos, and the kWh price in millionths of a
-  real (up to 4 decimals are accepted, e.g. R$ 0,8743).
-- One reading per chácara per month (unique constraint); the "current" month
-  follows the São Paulo time zone.
-- Bills are due on the configured day of the month after the reading.
+- Readings are the m³ on each chácara's water meter (hidrômetro).
+- **Consumo** = leitura atual − última leitura (m³).
+- **Energia** = conta de energia da bomba × consumo ÷ consumo de todas as
+  chácaras lidas no período. Shares are whole centavos that add up to the
+  bill exactly (the leftover centavos go to the largest remainders).
+- **Total** = energia + fundo de reserva.
+- A period has default dates for every chácara; a reading may end on its own
+  date, and it starts when the chácara's previous reading ended (a chácara
+  skipped in a period spans both in the next one).
+- One reading per chácara per period (unique constraint). Dates are stored as
+  YYYY-MM-DD; "today" follows the São Paulo time zone.
+- Money is stored as integers (centavos). Each reading stores its energy
+  share and fund: unpaid ones are recalculated whenever the period changes,
+  paid ones keep what was charged.
+- Bills are due on the configured day of the month after the period ends.
+
+### From months to periods (migration `0004_periods`)
+
+Databases made before periods existed are converted on start: each month
+with readings or values becomes a period ending on day 10 (when the old app's
+meters were read), starting where the previous one ended when that was at
+most three months earlier. Its electricity bill is what its readings charged
+for energy (their old price × m³), so every bill keeps its value; the old
+history's dates come out exactly as the old app wrote them. If a period typed
+in this app before the change used other dates, correct them on the Leituras
+screen; if its "preço do kWh" was not really a price per m³, type the real
+electricity bill there and the unpaid bills follow.
 - The Pix QR code is a static BR Code (Banco Central EMV format with CRC16)
   carrying the bill amount; it needs the Pix key, the beneficiary name and city.

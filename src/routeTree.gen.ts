@@ -24,7 +24,7 @@ import { Route as CadastrosIndexRouteImport } from './routes/cadastros.index'
 import { Route as ChacarasIdRouteImport } from './routes/chacaras.$id'
 import { Route as RelatoriosIndexRouteImport } from './routes/relatorios.index'
 import { Route as RelatoriosAnualRouteImport } from './routes/relatorios.anual'
-import { Route as RelatoriosMensalRouteImport } from './routes/relatorios.mensal'
+import { Route as RelatoriosPeriodoRouteImport } from './routes/relatorios.periodo'
 import { Route as CadastrosChacarasIndexRouteImport } from './routes/cadastros.chacaras.index'
 import { Route as CadastrosChacarasIdRouteImport } from './routes/cadastros.chacaras.$id'
 import { Route as CadastrosChacarasNovaRouteImport } from './routes/cadastros.chacaras.nova'
@@ -107,9 +107,9 @@ const RelatoriosAnualRoute = RelatoriosAnualRouteImport.update({
   path: '/anual',
   getParentRoute: () => RelatoriosRoute,
 } as any)
-const RelatoriosMensalRoute = RelatoriosMensalRouteImport.update({
-  id: '/mensal',
-  path: '/mensal',
+const RelatoriosPeriodoRoute = RelatoriosPeriodoRouteImport.update({
+  id: '/periodo',
+  path: '/periodo',
   getParentRoute: () => RelatoriosRoute,
 } as any)
 const CadastrosChacarasIndexRoute = CadastrosChacarasIndexRouteImport.update({
@@ -160,7 +160,7 @@ export interface FileRoutesByFullPath {
   '/api/exportar': typeof ApiExportarRoute
   '/chacaras/$id': typeof ChacarasIdRoute
   '/relatorios/anual': typeof RelatoriosAnualRoute
-  '/relatorios/mensal': typeof RelatoriosMensalRoute
+  '/relatorios/periodo': typeof RelatoriosPeriodoRoute
   '/cadastros/': typeof CadastrosIndexRoute
   '/relatorios/': typeof RelatoriosIndexRoute
   '/cadastros/chacaras/$id': typeof CadastrosChacarasIdRoute
@@ -182,7 +182,7 @@ export interface FileRoutesByTo {
   '/api/exportar': typeof ApiExportarRoute
   '/chacaras/$id': typeof ChacarasIdRoute
   '/relatorios/anual': typeof RelatoriosAnualRoute
-  '/relatorios/mensal': typeof RelatoriosMensalRoute
+  '/relatorios/periodo': typeof RelatoriosPeriodoRoute
   '/cadastros': typeof CadastrosIndexRoute
   '/relatorios': typeof RelatoriosIndexRoute
   '/cadastros/chacaras/$id': typeof CadastrosChacarasIdRoute
@@ -207,7 +207,7 @@ export interface FileRoutesById {
   '/api/exportar': typeof ApiExportarRoute
   '/chacaras/$id': typeof ChacarasIdRoute
   '/relatorios/anual': typeof RelatoriosAnualRoute
-  '/relatorios/mensal': typeof RelatoriosMensalRoute
+  '/relatorios/periodo': typeof RelatoriosPeriodoRoute
   '/cadastros/': typeof CadastrosIndexRoute
   '/relatorios/': typeof RelatoriosIndexRoute
   '/cadastros/chacaras/$id': typeof CadastrosChacarasIdRoute
@@ -233,7 +233,7 @@ export interface FileRouteTypes {
     | '/api/exportar'
     | '/chacaras/$id'
     | '/relatorios/anual'
-    | '/relatorios/mensal'
+    | '/relatorios/periodo'
     | '/cadastros/'
     | '/relatorios/'
     | '/cadastros/chacaras/$id'
@@ -255,7 +255,7 @@ export interface FileRouteTypes {
     | '/api/exportar'
     | '/chacaras/$id'
     | '/relatorios/anual'
-    | '/relatorios/mensal'
+    | '/relatorios/periodo'
     | '/cadastros'
     | '/relatorios'
     | '/cadastros/chacaras/$id'
@@ -279,7 +279,7 @@ export interface FileRouteTypes {
     | '/api/exportar'
     | '/chacaras/$id'
     | '/relatorios/anual'
-    | '/relatorios/mensal'
+    | '/relatorios/periodo'
     | '/cadastros/'
     | '/relatorios/'
     | '/cadastros/chacaras/$id'
@@ -412,11 +412,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RelatoriosAnualRouteImport
       parentRoute: typeof RelatoriosRoute
     }
-    '/relatorios/mensal': {
-      id: '/relatorios/mensal'
-      path: '/mensal'
-      fullPath: '/relatorios/mensal'
-      preLoaderRoute: typeof RelatoriosMensalRouteImport
+    '/relatorios/periodo': {
+      id: '/relatorios/periodo'
+      path: '/periodo'
+      fullPath: '/relatorios/periodo'
+      preLoaderRoute: typeof RelatoriosPeriodoRouteImport
       parentRoute: typeof RelatoriosRoute
     }
     '/cadastros/chacaras/': {
@@ -490,13 +490,13 @@ const CadastrosRouteWithChildren = CadastrosRoute._addFileChildren(
 
 interface RelatoriosRouteChildren {
   RelatoriosAnualRoute: typeof RelatoriosAnualRoute
-  RelatoriosMensalRoute: typeof RelatoriosMensalRoute
+  RelatoriosPeriodoRoute: typeof RelatoriosPeriodoRoute
   RelatoriosIndexRoute: typeof RelatoriosIndexRoute
 }
 
 const RelatoriosRouteChildren: RelatoriosRouteChildren = {
   RelatoriosAnualRoute: RelatoriosAnualRoute,
-  RelatoriosMensalRoute: RelatoriosMensalRoute,
+  RelatoriosPeriodoRoute: RelatoriosPeriodoRoute,
   RelatoriosIndexRoute: RelatoriosIndexRoute,
 }
 

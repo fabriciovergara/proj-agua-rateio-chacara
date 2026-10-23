@@ -19,11 +19,6 @@ export function centsToCsv(cents: number): string {
   return (cents / 100).toFixed(2).replace('.', ',')
 }
 
-/** 874300 → "0,8743" */
-export function microsToCsv(micros: number): string {
-  return (micros / 1_000_000).toFixed(4).replace('.', ',')
-}
-
 export function downloadCsv(filename: string, content: string) {
   const blob = new Blob([content], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)

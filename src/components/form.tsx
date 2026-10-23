@@ -22,13 +22,8 @@ import {
 } from '#/components/ui/input-group'
 import { NativeSelect, NativeSelectOption } from '#/components/ui/native-select'
 import { Textarea } from '#/components/ui/textarea'
-import {
-  centsToInput,
-  formatNumber,
-  microsToInput,
-  parseCents,
-  parsePriceMicros,
-} from '#/lib/money'
+import { formatDateTyping } from '#/lib/masks'
+import { centsToInput, formatNumber, parseCents } from '#/lib/money'
 
 /*
  * Form building blocks on top of shadcn's Field: each one wires the label,
@@ -197,24 +192,16 @@ export function SelectField({
 export function MoneyInput({
   value,
   onChange,
-  kind = 'cents',
   className,
   ...props
 }: {
   value: string
   onChange: (value: string) => void
-  /** `price` allows up to 4 decimal places (kWh tariffs). */
-  kind?: 'cents' | 'price'
   className?: string
 } & Omit<ComponentProps<'input'>, 'value' | 'onChange' | 'className'>) {
   function tidy() {
-    if (kind === 'price') {
-      const micros = parsePriceMicros(value)
-      if (micros !== null) onChange(microsToInput(micros))
-    } else {
-      const cents = parseCents(value)
-      if (cents !== null) onChange(centsToInput(cents))
-    }
+    const cents = parseCents(value)
+    if (cents !== null) onChange(centsToInput(cents))
   }
 
   return (
@@ -238,6 +225,34 @@ export function MoneyInput({
   )
 }
 
+/**
+ * A day typed as DD/MM/AAAA, whatever the browser's language: the slashes
+ * appear while typing. The text stays as typed; `parseDate` reads it.
+ */
+export function DateInput({
+  value,
+  onChange,
+  className,
+  ...props
+}: {
+  value: string
+  onChange: (value: string) => void
+  className?: string
+} & Omit<ComponentProps<'input'>, 'value' | 'onChange'>) {
+  return (
+    <Input
+      {...props}
+      className={cn('tabular-nums', className)}
+      inputMode="numeric"
+      autoComplete="off"
+      placeholder="dd/mm/aaaa"
+      maxLength={10}
+      value={value}
+      onChange={(event) => onChange(formatDateTyping(event.target.value))}
+    />
+  )
+}
+
 /** Looks like the counter on the meter: dark wheels, white digits. */
 export const meterInputClass =
   'h-auto min-h-13 rounded-md border-2 border-counter bg-counter px-3 py-1.5 text-right font-mono text-[1.55rem] font-semibold tracking-[0.14em] text-white tabular-nums shadow-[inset_0_2px_0_rgb(0_0_0/0.35)] placeholder:text-[#7d8699] focus-visible:border-ring focus-visible:ring-ring/60 aria-invalid:border-[#f2867d] aria-invalid:ring-2 aria-invalid:ring-destructive data-[dirty=true]:border-ring md:text-[1.55rem]'
@@ -245,17 +260,20 @@ export const meterInputClass =
 /**
  * Digits only. While typing the digits are plain; afterwards they get
  * thousands separators like the rest of the screen ("12296" → "12.296").
+ * `plain` drops the meter's counter look (for "Última leitura").
  */
 export function MeterInput({
   value,
   onChange,
   dirty,
+  look = 'counter',
   className,
   ...props
 }: {
   value: string
   onChange: (value: string) => void
   dirty?: boolean
+  look?: 'counter' | 'plain'
   className?: string
 } & Omit<ComponentProps<'input'>, 'value' | 'onChange'>) {
   const [editing, setEditing] = useState(false)
@@ -272,7 +290,7 @@ export function MeterInput({
     <Input
       {...props}
       ref={ref}
-      className={cn(meterInputClass, className)}
+      className={cn(look === 'counter' && meterInputClass, className)}
       inputMode="numeric"
       autoComplete="off"
       maxLength={11}

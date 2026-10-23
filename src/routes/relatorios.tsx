@@ -12,12 +12,12 @@ function ReportsLayout() {
       <div className="print:hidden">
         <PageHeader
           title="Relatórios"
-          description="Cobranças para enviar aos proprietários e o resumo do ano. Tudo pode ser impresso ou salvo em PDF."
+          description="Cobranças de cada período para enviar aos proprietários e o resumo do ano. Tudo pode ser impresso ou salvo em PDF."
         />
         <SectionTabs
           label="Tipo de relatório"
           items={[
-            { to: '/relatorios/mensal', label: 'Cobrança do mês' },
+            { to: '/relatorios/periodo', label: 'Cobranças do período' },
             { to: '/relatorios/anual', label: 'Relatório anual' },
           ]}
         />

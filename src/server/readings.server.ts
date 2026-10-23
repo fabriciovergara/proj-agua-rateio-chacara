@@ -1,298 +1,344 @@
-import { and, asc, desc, eq, gt, inArray, lt, ne, or, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray } from 'drizzle-orm'
 import type { Executor } from '#/db/client.server'
 import {
-  monthRates,
   owners,
+  type Period,
+  periods,
   properties,
   type Reading,
   readings,
 } from '#/db/schema'
-import { computeBill } from '#/lib/billing'
+import { billOf, consumptionOf } from '#/lib/billing'
 import { translateDatabaseError, UserFacingError } from '#/lib/errors'
 import { formatNumber } from '#/lib/money'
 import {
-  addMonths,
-  comparePeriods,
-  currentPeriod,
-  formatPeriod,
-  type Period,
+  type DateRange,
+  formatDate,
+  formatDateRange,
+  todayISO,
+  yearOf,
 } from '#/lib/periods'
 import {
-  type MonthEntriesInput,
-  monthEntriesSchema,
+  type PeriodSheetInput,
+  periodSheetSchema,
+  type ReadingEntryInput,
   type ReadingInput,
+  readingEntrySchema,
   readingSchema,
   type UpdateReadingInput,
   updateReadingSchema,
 } from '#/lib/schemas'
+import {
+  adjacentPeriods,
+  getPeriod,
+  latestPeriod,
+  listPeriods,
+  newPeriodDefaults,
+  periodCounts,
+  periodYears,
+  repricePeriod,
+  savePeriodValues,
+} from './periods.server'
 
 const byName = new Intl.Collator('pt-BR', {
   numeric: true,
   sensitivity: 'base',
 })
 
-const periodIndex = sql<number>`${readings.year} * 12 + ${readings.month}`
-const indexOf = (period: Period) => period.year * 12 + period.month
-
-export function withBill<T extends Reading>(reading: T) {
-  return { ...reading, bill: computeBill(reading) }
-}
-
 const ownerSummary = { id: owners.id, name: owners.name, phone: owners.phone }
 
-/** Readings before `period` per chácara, newest first. */
-function historyBefore(
-  db: Executor,
-  propertyIds: number[],
-  period: Period,
-  excludeId?: number,
-) {
-  const history = new Map<number, Reading[]>()
-  if (propertyIds.length === 0) return history
-  const rows = db
-    .select()
-    .from(readings)
-    .where(
-      and(
-        inArray(readings.propertyId, propertyIds),
-        lt(periodIndex, indexOf(period)),
-        excludeId === undefined ? undefined : ne(readings.id, excludeId),
-      ),
-    )
-    .all()
-    .sort((a, b) => comparePeriods(b, a))
-  for (const row of rows) {
-    const list = history.get(row.propertyId) ?? []
-    list.push(row)
-    history.set(row.propertyId, list)
-  }
-  return history
+const periodColumns = {
+  id: periods.id,
+  startDate: periods.startDate,
+  endDate: periods.endDate,
+  energyBillCents: periods.energyBillCents,
 }
 
-/** The most recent reading before `period`, per chácara. */
-function latestBefore(
-  db: Executor,
-  propertyIds: number[],
-  period: Period,
-  excludeId?: number,
-) {
-  const latest = new Map<number, Reading>()
-  for (const [propertyId, list] of historyBefore(
-    db,
-    propertyIds,
+type PeriodSummary = Pick<
+  Period,
+  'id' | 'startDate' | 'endDate' | 'energyBillCents'
+>
+type Placed = { reading: Reading; period: PeriodSummary }
+
+/**
+ * A reading as the screens show it: its bill and its own dates. A reading
+ * ends on its own date or the period's end, and starts when the chácara's
+ * reading before it ended (the first one: its own date or the period's
+ * start).
+ */
+function present({ reading, period }: Placed, before: Placed | undefined) {
+  const { startDate: _start, endDate: _end, ...values } = reading
+  return {
+    ...values,
+    startDate: before ? endOf(before) : (reading.startDate ?? period.startDate),
+    endDate: endOf({ reading, period }),
     period,
-    excludeId,
-  )) {
-    const [newest] = list
-    if (newest) latest.set(propertyId, newest)
+    bill: billOf(reading),
   }
-  return latest
 }
 
-/** Average consumption of the last 6 readings, to spot typos. */
-function recentAverage(list: Reading[] | undefined): number | null {
-  const recent = (list ?? []).slice(0, 6)
+export type ReadingView = ReturnType<typeof present>
+
+const endOf = ({ reading, period }: Placed) => reading.endDate ?? period.endDate
+
+/** The readings of each chácara, oldest first. */
+function timelines(db: Executor, propertyIds?: number[]) {
+  const rows = db
+    .select({ reading: readings, period: periodColumns })
+    .from(readings)
+    .innerJoin(periods, eq(periods.id, readings.periodId))
+    .where(propertyIds ? inArray(readings.propertyId, propertyIds) : undefined)
+    .orderBy(asc(readings.propertyId), asc(periods.startDate))
+    .all()
+  const byProperty = new Map<number, Placed[]>()
+  for (const row of rows) {
+    const list = byProperty.get(row.reading.propertyId) ?? []
+    list.push(row)
+    byProperty.set(row.reading.propertyId, list)
+  }
+  return byProperty
+}
+
+/** Every reading of the given chácaras (all when omitted) with its dates. */
+export function presentReadings(db: Executor, propertyIds?: number[]) {
+  const result = new Map<number, ReadingView>()
+  for (const list of timelines(db, propertyIds).values()) {
+    list.forEach((placed, index) => {
+      result.set(placed.reading.id, present(placed, list[index - 1]))
+    })
+  }
+  return result
+}
+
+/** Where `period` falls in a chácara's readings. */
+function locate(list: Placed[], period: DateRange) {
+  const found = list.findIndex(
+    ({ period: other }) => other.startDate >= period.startDate,
+  )
+  const at = found === -1 ? list.length : found
+  const existing =
+    list[at]?.period.startDate === period.startDate ? list[at] : undefined
+  return {
+    existing,
+    before: list[at - 1],
+    after: list[existing ? at + 1 : at],
+    /** The reading before `before`, to know when `before` started. */
+    beforeBefore: list[at - 2],
+    /** The readings before the period. */
+    earlier: list.slice(0, at),
+  }
+}
+
+/** Average consumption of the last readings, to spot typos. */
+function recentAverage(list: Placed[]): number | null {
+  const recent = list.slice(-6)
   if (recent.length === 0) return null
   const total = recent.reduce(
-    (sum, r) => sum + (r.currentReading - r.previousReading),
+    (sum, { reading }) => sum + consumptionOf(reading),
     0,
   )
   return Math.round(total / recent.length)
 }
 
-function findReading(db: Executor, propertyId: number, period: Period) {
-  return db
-    .select()
-    .from(readings)
-    .where(
-      and(
-        eq(readings.propertyId, propertyId),
-        eq(readings.year, period.year),
-        eq(readings.month, period.month),
-      ),
-    )
+/** A date stored only when it differs from the period's. */
+const ownDate = (date: string, periodDate: string) =>
+  date === periodDate ? null : date
+
+/** Another reading that a save also changed, for the confirmation. */
+export interface Relinked {
+  property: string
+  startDate: string
+  endDate: string
+}
+
+/**
+ * Saves one chácara's reading in a period (new or corrected) and keeps the
+ * chain between its readings:
+ *  - "Última leitura" is the previous reading's "Leitura atual": changing it
+ *    corrects the previous reading too, unless the meter was replaced;
+ *  - the reading after it starts where this one ends, in m³ and in date.
+ * Returns the periods it changed, which the caller reprices.
+ */
+function saveEntry(tx: Executor, period: Period, input: ReadingEntryInput) {
+  const entry = readingEntrySchema.parse(input)
+  const property = tx
+    .select({ id: properties.id, name: properties.name })
+    .from(properties)
+    .where(eq(properties.id, entry.propertyId))
     .get()
-}
+  if (!property) throw new UserFacingError('Chácara não encontrada.')
+  const name = property.name
 
-const ratesIndex = sql<number>`${monthRates.year} * 12 + ${monthRates.month}`
+  const list = timelines(tx, [property.id]).get(property.id) ?? []
+  const { existing, before, after, beforeBefore } = locate(list, period)
+  const touched = new Set<number>([period.id])
+  /** Other readings of the chácara this save corrected. */
+  const corrected = new Set<number>()
 
-/** The kWh price and reserve fund saved for a month, if any. */
-export function getMonthRates(db: Executor, period: Period) {
-  return (
-    db
-      .select()
-      .from(monthRates)
-      .where(
-        and(
-          eq(monthRates.year, period.year),
-          eq(monthRates.month, period.month),
-        ),
-      )
-      .get() ?? null
-  )
-}
-
-/**
- * The values to use for a month: the saved ones or, until the month is
- * saved, those of the latest earlier month (they rarely change).
- */
-export function ratesFor(db: Executor, period: Period) {
-  const saved = getMonthRates(db, period)
-  const fallback =
-    saved ??
-    db
-      .select()
-      .from(monthRates)
-      .where(lt(ratesIndex, indexOf(period)))
-      .orderBy(desc(monthRates.year), desc(monthRates.month))
-      .limit(1)
-      .get() ??
-    db
-      .select()
-      .from(monthRates)
-      .orderBy(desc(monthRates.year), desc(monthRates.month))
-      .limit(1)
-      .get()
-  if (!fallback) return null
-  return {
-    kwhPriceMicros: fallback.kwhPriceMicros,
-    reserveFundCents: fallback.reserveFundCents,
-    saved: saved !== null,
-    /** Where a suggestion came from (null when the month has its own). */
-    suggestedFrom: saved
-      ? null
-      : { year: fallback.year, month: fallback.month },
-  }
-}
-
-/**
- * Saves a month's values. When they change, the month's unpaid bills follow;
- * paid bills keep what was charged. Returns how many bills were re-priced.
- */
-function saveRates(
-  db: Executor,
-  period: Period,
-  rates: { kwhPriceMicros: number; reserveFundCents: number },
-) {
-  const current = getMonthRates(db, period)
+  // "Última leitura" corrects the reading before, if they were linked.
+  const linked = existing
+    ? before?.reading.currentReading === existing.reading.previousReading
+    : true
   if (
-    current?.kwhPriceMicros === rates.kwhPriceMicros &&
-    current.reserveFundCents === rates.reserveFundCents
+    before &&
+    linked &&
+    !entry.meterReplaced &&
+    entry.previousReading !== before.reading.currentReading
   ) {
-    return 0
+    if (entry.previousReading < before.reading.previousReading) {
+      throw new UserFacingError(
+        `${name}: a última leitura (${formatNumber(entry.previousReading)}) é menor que a leitura anterior a ela (${formatNumber(before.reading.previousReading)}). Confira o número; se o hidrômetro foi trocado, confirme a troca.`,
+      )
+    }
+    tx.update(readings)
+      .set({ currentReading: entry.previousReading })
+      .where(eq(readings.id, before.reading.id))
+      .run()
+    touched.add(before.period.id)
+    corrected.add(before.reading.id)
   }
-  db.insert(monthRates)
-    .values({ ...period, ...rates })
-    .onConflictDoUpdate({
-      target: [monthRates.year, monthRates.month],
-      set: { ...rates, updatedAt: new Date() },
-    })
-    .run()
-  return db
-    .update(readings)
-    .set(rates)
-    .where(
-      and(
-        eq(readings.year, period.year),
-        eq(readings.month, period.month),
-        eq(readings.paid, false),
-        or(
-          ne(readings.kwhPriceMicros, rates.kwhPriceMicros),
-          ne(readings.reserveFundCents, rates.reserveFundCents),
-        ),
-      ),
-    )
-    .returning({ id: readings.id })
-    .all().length
-}
 
-/**
- * "Leitura anterior" normally repeats the previous month's reading. A
- * different value is only legitimate when the meter was replaced or reset,
- * so it has to be confirmed explicitly (a typo there silently inflates the
- * bill).
- */
-function assertChained(
-  before: Reading | undefined,
-  previousReading: number,
-  confirmed: boolean | undefined,
-) {
-  if (!before || confirmed || before.currentReading === previousReading) return
-  throw new UserFacingError(
-    `A leitura anterior (${formatNumber(previousReading)}) é diferente da leitura de ${formatPeriod(before)} (${formatNumber(before.currentReading)}). Confira o número; ele só muda quando o hidrômetro é trocado.`,
-  )
-}
-
-/**
- * Keeps the chain "leitura anterior = leitura atual do mês anterior" intact:
- * when a month's reading changes, the next month that was linked to the old
- * value follows the new one. Returns the period that was updated, if any.
- */
-function relinkNext(
-  db: Executor,
-  propertyId: number,
-  period: Period,
-  oldValue: number | undefined,
-  newValue: number,
-): Period | null {
-  if (oldValue === undefined || oldValue === newValue) return null
-  const next = db
-    .select()
-    .from(readings)
-    .where(
-      and(
-        eq(readings.propertyId, propertyId),
-        gt(periodIndex, indexOf(period)),
-      ),
-    )
-    .orderBy(asc(readings.year), asc(readings.month))
-    .limit(1)
-    .get()
-  if (!next || next.previousReading !== oldValue) return null
-  if (next.currentReading < newValue) {
+  // The date of the última leitura is when the reading before ended.
+  if (before && entry.startDate !== endOf(before)) {
+    const beforeStart = present(before, beforeBefore).startDate
+    if (entry.startDate <= beforeStart) {
+      throw new UserFacingError(
+        `${name}: a data da última leitura (${formatDate(entry.startDate)}) ficaria antes da leitura anterior a ela (${formatDate(beforeStart)}).`,
+      )
+    }
+    tx.update(readings)
+      .set({ endDate: ownDate(entry.startDate, before.period.endDate) })
+      .where(eq(readings.id, before.reading.id))
+      .run()
+    corrected.add(before.reading.id)
+  }
+  if (after && entry.endDate >= endOf(after)) {
     throw new UserFacingError(
-      `A leitura de ${formatPeriod(next)} (${formatNumber(next.currentReading)}) ficaria menor que ${formatNumber(newValue)}. Corrija ${formatPeriod(next)} primeiro.`,
+      `${name}: a data da leitura (${formatDate(entry.endDate)}) ficaria depois da leitura seguinte (${formatDate(endOf(after))}).`,
     )
   }
-  db.update(readings)
-    .set({ previousReading: newValue })
-    .where(eq(readings.id, next.id))
-    .run()
-  return { year: next.year, month: next.month }
+
+  const values = {
+    previousReading: entry.previousReading,
+    currentReading: entry.currentReading,
+    // Only the first reading keeps its start; later ones follow the one before.
+    startDate: before ? null : ownDate(entry.startDate, period.startDate),
+    endDate: ownDate(entry.endDate, period.endDate),
+  }
+  const reading = existing
+    ? tx
+        .update(readings)
+        .set(values)
+        .where(eq(readings.id, existing.reading.id))
+        .returning()
+        .get()
+    : tx
+        .insert(readings)
+        .values({
+          ...values,
+          propertyId: property.id,
+          periodId: period.id,
+          energyCents: null,
+          reserveFundCents: period.reserveFundCents,
+        })
+        .returning()
+        .get()
+
+  // The reading after follows "Leitura atual", if they were linked. A new
+  // reading before the chácara's first one becomes the one it follows.
+  const linkedTo = existing
+    ? existing.reading.currentReading
+    : before
+      ? before.reading.currentReading
+      : after?.reading.previousReading
+  if (
+    after &&
+    after.reading.previousReading === linkedTo &&
+    linkedTo !== entry.currentReading
+  ) {
+    if (after.reading.currentReading < entry.currentReading) {
+      throw new UserFacingError(
+        `${name}: a leitura de ${formatDateRange(present(after, existing ?? before))} (${formatNumber(after.reading.currentReading)}) ficaria menor que ${formatNumber(entry.currentReading)}. Corrija aquela leitura primeiro.`,
+      )
+    }
+    tx.update(readings)
+      .set({ previousReading: entry.currentReading })
+      .where(eq(readings.id, after.reading.id))
+      .run()
+    touched.add(after.period.id)
+    corrected.add(after.reading.id)
+  }
+
+  // Describe the corrected readings as they are now.
+  const relinked: Relinked[] = []
+  if (corrected.size > 0) {
+    const now = timelines(tx, [property.id]).get(property.id) ?? []
+    now.forEach((placed, index) => {
+      if (!corrected.has(placed.reading.id)) return
+      const { startDate, endDate } = present(placed, now[index - 1])
+      relinked.push({ property: name, startDate, endDate })
+    })
+  }
+
+  const changed =
+    !existing ||
+    corrected.size > 0 ||
+    existing.reading.previousReading !== values.previousReading ||
+    existing.reading.currentReading !== values.currentReading ||
+    existing.reading.startDate !== values.startDate ||
+    existing.reading.endDate !== values.endDate
+  return { reading, touched, relinked, changed }
 }
 
-/** Everything the "Leituras do mês" screen needs. */
-export function getMonthSheet(db: Executor, period: Period) {
-  const monthReadings = db
-    .select()
-    .from(readings)
-    .where(
-      and(eq(readings.year, period.year), eq(readings.month, period.month)),
-    )
-    .all()
-  const readingByProperty = new Map(
-    monthReadings.map((reading) => [reading.propertyId, reading]),
-  )
+function repriceAll(tx: Executor, periodIds: Iterable<number>) {
+  for (const id of periodIds) repricePeriod(tx, id)
+}
 
+/** Everything the Leituras screen needs for one period. */
+export function getPeriodSheet(
+  db: Executor,
+  periodId: number | undefined,
+  today = todayISO(),
+) {
+  const all = listPeriods(db)
+  const period =
+    (periodId === undefined ? null : getPeriod(db, periodId)) ??
+    latestPeriod(db)
+  const newPeriod = newPeriodDefaults(db, today)
+  /** Active chácaras: without any, there is nothing to read. */
+  const chacaras = db
+    .select({ id: properties.id })
+    .from(properties)
+    .where(eq(properties.active, true))
+    .all().length
+  if (!period) {
+    return { periods: all, period: null, newPeriod, chacaras, rows: [] }
+  }
+
+  const inPeriod = new Set(
+    db
+      .select({ propertyId: readings.propertyId })
+      .from(readings)
+      .where(eq(readings.periodId, period.id))
+      .all()
+      .map((row) => row.propertyId),
+  )
   const visible = db
     .select({ property: properties, owner: ownerSummary })
     .from(properties)
     .leftJoin(owners, eq(owners.id, properties.ownerId))
     .all()
-    // Inactive chácaras only appear in months where they were billed.
-    .filter(
-      ({ property }) => property.active || readingByProperty.has(property.id),
-    )
+    // Inactive chácaras only appear in periods where they were read.
+    .filter(({ property }) => property.active || inPeriod.has(property.id))
     .sort((a, b) => byName.compare(a.property.name, b.property.name))
-
-  const previous = historyBefore(
+  const histories = timelines(
     db,
     visible.map(({ property }) => property.id),
-    period,
   )
 
   const rows = visible.map(({ property, owner }) => {
-    const reading = readingByProperty.get(property.id)
+    const list = histories.get(property.id) ?? []
+    const { existing, before, beforeBefore, earlier } = locate(list, period)
     return {
       property: {
         id: property.id,
@@ -301,130 +347,65 @@ export function getMonthSheet(db: Executor, period: Period) {
         active: property.active,
       },
       owner,
-      reading: reading ? withBill(reading) : null,
-      /** Used as "Leitura anterior" when the month has no reading yet. */
-      suggestedPreviousReading:
-        previous.get(property.id)?.[0]?.currentReading ?? null,
-      averageConsumption: recentAverage(previous.get(property.id)),
+      reading: existing ? present(existing, before) : null,
+      /** The chácara's reading before this period: "Última leitura". */
+      previous: before
+        ? {
+            ...present(before, beforeBefore),
+            /**
+             * It ends with its period, right where this one starts: moving
+             * this period's start moves it too.
+             */
+            endsAtPeriodStart:
+              before.reading.endDate === null &&
+              before.period.endDate === period.startDate,
+          }
+        : null,
+      averageConsumption: recentAverage(earlier),
     }
   })
 
-  let totalCents = 0
-  let paidCents = 0
-  let paidCount = 0
-  for (const { reading } of rows) {
-    if (!reading) continue
-    totalCents += reading.bill.totalCents
-    if (reading.paid) {
-      paidCents += reading.bill.totalCents
-      paidCount++
-    }
-  }
-
+  const { previous, next } = adjacentPeriods(db, period)
   return {
-    period,
-    /** kWh price and reserve fund of the month (or a suggestion). */
-    rates: ratesFor(db, period),
-    rows,
-    summary: {
-      chacaras: rows.length,
-      readCount: rows.filter((row) => row.reading).length,
-      paidCount,
-      totalCents,
-      paidCents,
-      pendingCents: totalCents - paidCents,
+    periods: all,
+    period: {
+      ...period,
+      previousId: previous?.id ?? null,
+      nextId: next?.id ?? null,
+      counts: periodCounts(db, period.id),
     },
+    newPeriod,
+    chacaras,
+    rows,
   }
 }
 
-export type MonthSheet = ReturnType<typeof getMonthSheet>
+export type PeriodSheet = ReturnType<typeof getPeriodSheet>
 
 /**
- * Saves the monthly screen: the month's values (kWh price and reserve fund)
- * and the readings typed for it (new or corrected).
+ * Saves the Leituras screen: the period's dates and values and the readings
+ * typed in it (new or corrected), then splits the bill again.
  */
-export function saveMonthReadings(
-  db: Executor,
-  input: MonthEntriesInput,
-  today: string,
-) {
-  const { year, month, rates, entries } = monthEntriesSchema.parse(input)
-  const period = { year, month }
-  let saved = 0
-  let repriced = 0
-
+export function savePeriodSheet(db: Executor, input: PeriodSheetInput) {
+  const { periodId, period: values, entries } = periodSheetSchema.parse(input)
   try {
-    db.transaction((tx) => {
-      repriced = saveRates(tx, period, rates)
+    return db.transaction((tx) => {
+      const period = savePeriodValues(tx, periodId, values)
+      const touched = new Set<number>([period.id])
+      const relinked: Relinked[] = []
+      let saved = 0
       for (const entry of entries) {
-        const property = tx
-          .select({ id: properties.id, name: properties.name })
-          .from(properties)
-          .where(eq(properties.id, entry.propertyId))
-          .get()
-        if (!property) throw new UserFacingError('Chácara não encontrada.')
-
-        const existing = findReading(tx, property.id, period)
-        if (existing) {
-          if (existing.currentReading === entry.currentReading) continue
-          if (entry.currentReading < existing.previousReading) {
-            throw new UserFacingError(
-              `${property.name}: a leitura atual (${formatNumber(entry.currentReading)}) é menor que a anterior (${formatNumber(existing.previousReading)}).`,
-            )
-          }
-          tx.update(readings)
-            .set({ currentReading: entry.currentReading })
-            .where(eq(readings.id, existing.id))
-            .run()
-          relinkNext(
-            tx,
-            property.id,
-            period,
-            existing.currentReading,
-            entry.currentReading,
-          )
-          saved++
-          continue
-        }
-
-        const before = latestBefore(tx, [property.id], period).get(property.id)
-        const previousReading = before?.currentReading ?? entry.previousReading
-        if (previousReading === undefined) {
-          throw new UserFacingError(
-            `${property.name}: informe também a leitura anterior, porque é a primeira leitura desta chácara.`,
-          )
-        }
-        if (entry.currentReading < previousReading) {
-          throw new UserFacingError(
-            `${property.name}: a leitura atual (${formatNumber(entry.currentReading)}) é menor que a anterior (${formatNumber(previousReading)}).`,
-          )
-        }
-        tx.insert(readings)
-          .values({
-            propertyId: property.id,
-            year,
-            month,
-            previousReading,
-            currentReading: entry.currentReading,
-            kwhPriceMicros: rates.kwhPriceMicros,
-            reserveFundCents: rates.reserveFundCents,
-            readingDate: today,
-          })
-          .run()
-        relinkNext(
-          tx,
-          property.id,
-          period,
-          before?.currentReading,
-          entry.currentReading,
-        )
-        saved++
+        const result = saveEntry(tx, period, entry)
+        for (const id of result.touched) touched.add(id)
+        relinked.push(...result.relinked)
+        if (result.changed) saved++
       }
+      repriceAll(tx, touched)
+      return { saved, relinked }
     })
   } catch (error) {
     translateDatabaseError(error)
   }
-  return { saved, repriced }
 }
 
 export function setPaid(
@@ -432,14 +413,42 @@ export function setPaid(
   input: { id: number; paid: boolean },
   today: string,
 ) {
-  const updated = db
-    .update(readings)
-    .set({ paid: input.paid, paidAt: input.paid ? today : null })
-    .where(eq(readings.id, input.id))
-    .returning()
-    .get()
-  if (!updated) throw new UserFacingError('Leitura não encontrada.')
-  return updated
+  return db.transaction((tx) => {
+    const reading = tx
+      .select()
+      .from(readings)
+      .where(eq(readings.id, input.id))
+      .get()
+    if (!reading) throw new UserFacingError('Leitura não encontrada.')
+    if (input.paid && reading.energyCents === null) {
+      throw new UserFacingError(
+        'Informe antes o valor da conta de energia deste período.',
+      )
+    }
+    const updated = tx
+      .update(readings)
+      .set({
+        paid: input.paid,
+        paidAt: input.paid ? (reading.paidAt ?? today) : null,
+      })
+      .where(eq(readings.id, input.id))
+      .returning()
+      .get()
+    // No longer paid: it follows the period's split again.
+    if (!input.paid) repricePeriod(tx, reading.periodId)
+    return updated
+  })
+}
+
+/** Marks a reading paid or not after it was saved and repriced. */
+function applyPaid(
+  tx: Executor,
+  reading: Reading,
+  paid: boolean,
+  today: string,
+) {
+  if (reading.paid === paid) return
+  setPaid(tx, { id: reading.id, paid }, today)
 }
 
 /** The spreadsheet of one chácara ("Execução do programa"). */
@@ -452,28 +461,13 @@ export function getPropertySheet(db: Executor, propertyId: number) {
     .get()
   if (!row) return null
 
-  const history = db
-    .select()
-    .from(readings)
-    .where(eq(readings.propertyId, propertyId))
-    .orderBy(asc(readings.year), asc(readings.month))
-    .all()
-    .map(withBill)
-
-  const last = history.at(-1)
-  const nextPeriod = last ? addMonths(last, 1) : currentPeriod()
-  const rates = ratesFor(db, nextPeriod)
-
+  const list = timelines(db, [propertyId]).get(propertyId) ?? []
   return {
     property: row.property,
     owner: row.owner,
-    readings: history,
-    newRow: {
-      ...nextPeriod,
-      previousReading: last?.currentReading ?? null,
-      kwhPriceMicros: rates?.kwhPriceMicros ?? null,
-      reserveFundCents: rates?.reserveFundCents ?? null,
-    },
+    readings: list.map((placed, index) => present(placed, list[index - 1])),
+    /** Periods, newest first: "Nova leitura" offers those without one. */
+    periods: listPeriods(db),
   }
 }
 
@@ -482,48 +476,35 @@ export function createReading(
   input: ReadingInput,
   today: string,
 ) {
-  const { confirmPreviousChange, ...values } = readingSchema.parse(input)
-  const period = { year: values.year, month: values.month }
+  const { periodId, paid, ...entry } = readingSchema.parse(input)
   try {
     return db.transaction((tx) => {
-      const property = tx
-        .select({ id: properties.id })
-        .from(properties)
-        .where(eq(properties.id, values.propertyId))
+      const period = getPeriod(tx, periodId)
+      if (!period) throw new UserFacingError('Período não encontrado.')
+      const taken = tx
+        .select({ id: readings.id })
+        .from(readings)
+        .where(
+          and(
+            eq(readings.propertyId, entry.propertyId),
+            eq(readings.periodId, periodId),
+          ),
+        )
         .get()
-      if (!property) throw new UserFacingError('Chácara não encontrada.')
-
-      const before = latestBefore(tx, [values.propertyId], period).get(
-        values.propertyId,
-      )
-      assertChained(before, values.previousReading, confirmPreviousChange)
-      const reading = tx
-        .insert(readings)
-        .values({
-          ...values,
-          paidAt: values.paid ? today : null,
-          readingDate: today,
-        })
-        .returning()
-        .get()
-      // The first reading of a month also sets the month's values.
-      if (!getMonthRates(tx, period)) {
-        tx.insert(monthRates)
-          .values({
-            ...period,
-            kwhPriceMicros: values.kwhPriceMicros,
-            reserveFundCents: values.reserveFundCents,
-          })
-          .run()
+      if (taken) {
+        throw new UserFacingError(
+          'Esta chácara já tem leitura neste período. Corrija a linha dela na tabela.',
+        )
       }
-      const relinked = relinkNext(
-        tx,
-        values.propertyId,
-        period,
-        before?.currentReading,
-        values.currentReading,
-      )
-      return { reading, relinked }
+      const result = saveEntry(tx, period, entry)
+      repriceAll(tx, result.touched)
+      const saved = tx
+        .select()
+        .from(readings)
+        .where(eq(readings.id, result.reading.id))
+        .get()
+      if (saved) applyPaid(tx, saved, paid, today)
+      return { reading: result.reading, relinked: result.relinked }
     })
   } catch (error) {
     translateDatabaseError(error)
@@ -535,8 +516,7 @@ export function updateReading(
   input: UpdateReadingInput,
   today: string,
 ) {
-  const { id, confirmPreviousChange, ...values } =
-    updateReadingSchema.parse(input)
+  const { id, paid, ...values } = updateReadingSchema.parse(input)
   try {
     return db.transaction((tx) => {
       const existing = tx
@@ -545,106 +525,79 @@ export function updateReading(
         .where(eq(readings.id, id))
         .get()
       if (!existing) throw new UserFacingError('Leitura não encontrada.')
+      const period = getPeriod(tx, existing.periodId)
+      if (!period) throw new UserFacingError('Período não encontrado.')
 
-      // Old rows may already be off the chain (e.g. imported data); only a
-      // new value for "leitura anterior" needs confirming.
-      if (values.previousReading !== existing.previousReading) {
-        const before = latestBefore(
-          tx,
-          [existing.propertyId],
-          { year: values.year, month: values.month },
-          id,
-        ).get(existing.propertyId)
-        assertChained(before, values.previousReading, confirmPreviousChange)
-      }
-
-      const reading = tx
-        .update(readings)
-        .set({
-          ...values,
-          paidAt: values.paid ? (existing.paidAt ?? today) : null,
-        })
-        .where(eq(readings.id, id))
-        .returning()
-        .get()
-
-      const samePeriod =
-        existing.year === values.year && existing.month === values.month
-      const relinked = samePeriod
-        ? relinkNext(
-            tx,
-            existing.propertyId,
-            existing,
-            existing.currentReading,
-            values.currentReading,
-          )
-        : null
-      return { reading, relinked }
+      const result = saveEntry(tx, period, {
+        ...values,
+        propertyId: existing.propertyId,
+      })
+      repriceAll(tx, result.touched)
+      const saved = tx.select().from(readings).where(eq(readings.id, id)).get()
+      if (saved) applyPaid(tx, saved, paid, today)
+      return { reading: result.reading, relinked: result.relinked }
     })
   } catch (error) {
     translateDatabaseError(error)
   }
 }
 
+/** Deletes a reading; the other bills of its period are split again. */
 export function deleteReading(db: Executor, id: number) {
-  db.delete(readings).where(eq(readings.id, id)).run()
+  db.transaction((tx) => {
+    const reading = tx
+      .delete(readings)
+      .where(eq(readings.id, id))
+      .returning({ periodId: readings.periodId })
+      .get()
+    if (reading) repricePeriod(tx, reading.periodId)
+  })
 }
 
 export interface HistoryFilters {
   propertyId?: number
+  /** Periods that end in this year. */
   year?: number
   status?: 'pago' | 'pendente'
 }
 
 export function listHistory(db: Executor, filters: HistoryFilters) {
-  const conditions = [
-    filters.propertyId
-      ? eq(readings.propertyId, filters.propertyId)
-      : undefined,
-    filters.year ? eq(readings.year, filters.year) : undefined,
-    filters.status ? eq(readings.paid, filters.status === 'pago') : undefined,
-  ].filter((condition) => condition !== undefined)
+  const views = presentReadings(
+    db,
+    filters.propertyId ? [filters.propertyId] : undefined,
+  )
+  const people = new Map(
+    db
+      .select({
+        property: { id: properties.id, name: properties.name },
+        owner: { id: owners.id, name: owners.name },
+      })
+      .from(properties)
+      .leftJoin(owners, eq(owners.id, properties.ownerId))
+      .all()
+      .map((row) => [row.property.id, row]),
+  )
 
-  return db
-    .select({
-      reading: readings,
-      property: { id: properties.id, name: properties.name },
-      owner: { id: owners.id, name: owners.name },
+  return [...views.values()]
+    .filter(
+      (reading) =>
+        (!filters.year || yearOf(reading.period.endDate) === filters.year) &&
+        (!filters.status || reading.paid === (filters.status === 'pago')),
+    )
+    .flatMap((reading) => {
+      const who = people.get(reading.propertyId)
+      return who
+        ? [{ ...reading, property: who.property, owner: who.owner }]
+        : []
     })
-    .from(readings)
-    .innerJoin(properties, eq(properties.id, readings.propertyId))
-    .leftJoin(owners, eq(owners.id, properties.ownerId))
-    .where(conditions.length ? and(...conditions) : undefined)
-    .all()
     .sort(
       (a, b) =>
-        comparePeriods(b.reading, a.reading) ||
+        b.period.startDate.localeCompare(a.period.startDate) ||
         byName.compare(a.property.name, b.property.name),
     )
-    .map(({ reading, property, owner }) => ({
-      ...withBill(reading),
-      property,
-      owner,
-    }))
 }
 
-/** Years that have readings, newest first, always including the current year. */
-export function listYears(db: Executor) {
-  const years = db
-    .selectDistinct({ year: readings.year })
-    .from(readings)
-    .all()
-    .map((row) => row.year)
-  return [...new Set([currentPeriod().year, ...years])].sort((a, b) => b - a)
-}
-
-/** The most recent month that has readings, if any. */
-export function latestReadingPeriod(db: Executor): Period | null {
-  const row = db
-    .select({ year: readings.year, month: readings.month })
-    .from(readings)
-    .orderBy(desc(readings.year), desc(readings.month))
-    .limit(1)
-    .get()
-  return row ?? null
+/** Years with periods, newest first, always including the current year. */
+export function listYears(db: Executor, today = todayISO()) {
+  return [...new Set([yearOf(today), ...periodYears(db)])].sort((a, b) => b - a)
 }

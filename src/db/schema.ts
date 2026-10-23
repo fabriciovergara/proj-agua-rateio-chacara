@@ -3,7 +3,6 @@ import {
   check,
   index,
   integer,
-  primaryKey,
   sqliteTable,
   text,
   uniqueIndex,
@@ -11,10 +10,9 @@ import {
 import { ACCOUNT_TYPES, PIX_KEY_TYPES } from '#/lib/domain'
 
 /*
- * Money is stored as integers to avoid floating point errors:
- *  - values in R$ are stored in centavos (`*_cents`)
- *  - the kWh price is stored in millionths of a real (`*_micros`) because
- *    electricity tariffs often have more than two decimal places.
+ * Money is stored as integers to avoid floating point errors: values in R$
+ * are stored in centavos (`*_cents`). Meter readings are whole m³, and dates
+ * are ISO text (YYYY-MM-DD), which sorts and compares as dates.
  */
 
 const timestamps = {
@@ -40,21 +38,30 @@ export const settings = sqliteTable(
 )
 
 /**
- * kWh price and reserve fund of each month, typed on the "Leituras" screen.
- * Readings copy them, so a paid bill keeps the values it was charged with.
+ * A billing period ("Leituras"): from the day the meters were read before to
+ * the day they are read now, the pump's electricity bill for those days and
+ * the reserve fund. Periods never overlap, though one may start on the day
+ * the other ends. A chácara read on other days keeps its own dates in its
+ * reading.
  */
-export const monthRates = sqliteTable(
-  'month_rates',
+export const periods = sqliteTable(
+  'periods',
   {
-    year: integer('year').notNull(),
-    month: integer('month').notNull(),
-    kwhPriceMicros: integer('kwh_price_micros').notNull(),
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    startDate: text('start_date').notNull(),
+    endDate: text('end_date').notNull(),
+    /**
+     * The pump's electricity bill, split among the chácaras by the m³ each
+     * one used. Null until the bill arrives.
+     */
+    energyBillCents: integer('energy_bill_cents'),
+    /** Charged to every chácara read in the period. */
     reserveFundCents: integer('reserve_fund_cents').notNull(),
-    updatedAt: timestamps.updatedAt,
+    ...timestamps,
   },
   (t) => [
-    primaryKey({ columns: [t.year, t.month] }),
-    check('month_rates_month_range', sql`${t.month} between 1 and 12`),
+    uniqueIndex('periods_start_uq').on(t.startDate),
+    check('periods_dates', sql`${t.startDate} < ${t.endDate}`),
   ],
 )
 
@@ -143,8 +150,9 @@ export const properties = sqliteTable(
 )
 
 /**
- * One meter reading per chácara per month. The kWh price and the reserve fund
- * are copied from the month's values, so paid bills never change afterwards.
+ * One water meter reading per chácara per period. The share of the
+ * electricity bill and the reserve fund are stored with it: unpaid bills
+ * follow every change in the period, paid bills keep what was charged.
  */
 export const readings = sqliteTable(
   'readings',
@@ -153,37 +161,46 @@ export const readings = sqliteTable(
     propertyId: integer('property_id')
       .notNull()
       .references(() => properties.id, { onDelete: 'cascade' }),
-    year: integer('year').notNull(),
-    month: integer('month').notNull(),
+    periodId: integer('period_id')
+      .notNull()
+      .references(() => periods.id, { onDelete: 'cascade' }),
+    /** m³ on the meter at the previous reading ("Última leitura"). */
     previousReading: integer('previous_reading').notNull(),
+    /** m³ on the meter now ("Leitura atual"). */
     currentReading: integer('current_reading').notNull(),
-    kwhPriceMicros: integer('kwh_price_micros').notNull(),
+    /**
+     * When the meter was read before, kept only for a chácara's first
+     * reading (later ones start when the one before ended). Null: the
+     * period's start.
+     */
+    startDate: text('start_date'),
+    /** When the meter was read. Null: the period's end. */
+    endDate: text('end_date'),
+    /** Share of the period's electricity bill; null until it is known. */
+    energyCents: integer('energy_cents'),
     reserveFundCents: integer('reserve_fund_cents').notNull(),
     paid: integer('paid', { mode: 'boolean' }).notNull().default(false),
     /** ISO date (YYYY-MM-DD). */
     paidAt: text('paid_at'),
-    /** ISO date (YYYY-MM-DD). */
-    readingDate: text('reading_date'),
     notes: text('notes'),
     ...timestamps,
   },
   (t) => [
-    uniqueIndex('readings_property_period_uq').on(
-      t.propertyId,
-      t.year,
-      t.month,
-    ),
-    index('readings_period_idx').on(t.year, t.month),
-    check('readings_month_range', sql`${t.month} between 1 and 12`),
+    uniqueIndex('readings_property_period_uq').on(t.propertyId, t.periodId),
+    index('readings_period_idx').on(t.periodId),
     check(
       'readings_consumption_non_negative',
       sql`${t.currentReading} >= ${t.previousReading}`,
+    ),
+    check(
+      'readings_paid_has_amount',
+      sql`${t.paid} = 0 or ${t.energyCents} is not null`,
     ),
   ],
 )
 
 export type Settings = typeof settings.$inferSelect
-export type MonthRates = typeof monthRates.$inferSelect
+export type Period = typeof periods.$inferSelect
 export type BankAccount = typeof bankAccount.$inferSelect
 export type Owner = typeof owners.$inferSelect
 export type Property = typeof properties.$inferSelect

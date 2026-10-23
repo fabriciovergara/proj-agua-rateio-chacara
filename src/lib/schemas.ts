@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ACCOUNT_TYPES, PIX_KEY_TYPES, STATES } from './domain'
+import { isISODate } from './periods'
 import { MAX_PIX_KEY_LENGTH, validatePixKey } from './pix'
 
 /*
@@ -49,14 +50,7 @@ export const yearSchema = z
   .min(2000, 'Ano inválido.')
   .max(2100, 'Ano inválido.')
 
-export const monthSchema = z
-  .number()
-  .int()
-  .min(1, 'Mês inválido.')
-  .max(12, 'Mês inválido.')
-
-export const periodSchema = z.object({ year: yearSchema, month: monthSchema })
-
+/** m³ on a water meter. */
 const meterValue = z
   .number({ error: 'Informe a leitura.' })
   .int('Use apenas números inteiros.')
@@ -65,12 +59,19 @@ const meterValue = z
 
 const cents = z.number().int().min(0, 'O valor não pode ser negativo.')
 
-/** Price per kWh in micros; above R$ 100/kWh is surely a typo. */
-const kwhPrice = z
-  .number()
-  .int()
-  .min(0, 'O preço não pode ser negativo.')
-  .max(100_000_000, 'Preço do kWh muito alto. Confira o valor.')
+/** A day as YYYY-MM-DD (shown and typed as DD/MM/AAAA). */
+export const isoDateSchema = z
+  .string()
+  .refine(isISODate, 'Informe a data como 10/09/2026.')
+
+const rangeRule = {
+  check: (value: { startDate: string; endDate: string }) =>
+    value.startDate < value.endDate,
+  params: {
+    path: ['endDate'],
+    message: 'A data final precisa ser depois da inicial.',
+  },
+}
 
 export const ownerSchema = z.object({
   name: requiredText(120, 'Informe o nome do proprietário.'),
@@ -114,16 +115,6 @@ export const settingsSchema = z.object({
 })
 export type SettingsInput = z.input<typeof settingsSchema>
 
-/** kWh price and reserve fund of one month (Leituras). */
-export const monthRatesSchema = z.object({
-  kwhPriceMicros: kwhPrice,
-  reserveFundCents: cents.max(
-    10_000_000,
-    'Fundo de reserva muito alto. Confira o valor.',
-  ),
-})
-export type MonthRatesInput = z.input<typeof monthRatesSchema>
-
 export const bankAccountSchema = z
   .object({
     bankName: optionalText(80),
@@ -158,58 +149,79 @@ const consumptionRule = {
     value.currentReading >= value.previousReading,
   params: {
     path: ['currentReading'],
-    message: 'A leitura atual não pode ser menor que a anterior.',
+    message: 'A leitura atual não pode ser menor que a última leitura.',
   },
 }
 
+/** A period's dates and values (Leituras). */
+export const periodValuesSchema = z
+  .object({
+    startDate: isoDateSchema,
+    endDate: isoDateSchema,
+    /** The pump's electricity bill; null until it arrives. */
+    energyBillCents: cents
+      .max(10_000_000, 'Conta de energia muito alta. Confira o valor.')
+      .nullable(),
+    reserveFundCents: cents.max(
+      10_000_000,
+      'Fundo de reserva muito alto. Confira o valor.',
+    ),
+  })
+  .refine(rangeRule.check, rangeRule.params)
+export type PeriodValuesInput = z.input<typeof periodValuesSchema>
+
+export const newPeriodSchema = z
+  .object({ startDate: isoDateSchema, endDate: isoDateSchema })
+  .refine(rangeRule.check, rangeRule.params)
+export type NewPeriodInput = z.input<typeof newPeriodSchema>
+
+/** One chácara's reading in a period, as typed in a row. */
+const readingValues = {
+  /** "Última leitura": also corrects the chácara's previous reading. */
+  previousReading: meterValue,
+  currentReading: meterValue,
+  /** When this chácara's meter was read before and now. */
+  startDate: isoDateSchema,
+  endDate: isoDateSchema,
+  /**
+   * The meter was replaced: the previous reading stays as it is, even if
+   * "Última leitura" differs from it.
+   */
+  meterReplaced: z.boolean().optional(),
+}
+
+export const readingEntrySchema = z
+  .object({ propertyId: idSchema, ...readingValues })
+  .refine(consumptionRule.check, consumptionRule.params)
+  .refine(rangeRule.check, rangeRule.params)
+export type ReadingEntryInput = z.input<typeof readingEntrySchema>
+
+/** Everything the Leituras screen saves at once. */
+export const periodSheetSchema = z.object({
+  periodId: idSchema,
+  period: periodValuesSchema,
+  entries: z.array(readingEntrySchema).max(500),
+})
+export type PeriodSheetInput = z.input<typeof periodSheetSchema>
+
+/** "Nova leitura" on a chácara's page. */
 export const readingSchema = z
   .object({
     propertyId: idSchema,
-    year: yearSchema,
-    month: monthSchema,
-    previousReading: meterValue,
-    currentReading: meterValue,
-    kwhPriceMicros: kwhPrice,
-    reserveFundCents: cents,
+    periodId: idSchema,
+    ...readingValues,
     paid: z.boolean(),
-    /** The person confirmed a "leitura anterior" off the chain (new meter). */
-    confirmPreviousChange: z.boolean().optional(),
   })
   .refine(consumptionRule.check, consumptionRule.params)
+  .refine(rangeRule.check, rangeRule.params)
 export type ReadingInput = z.input<typeof readingSchema>
 
+/** Correcting a row on a chácara's page. */
 export const updateReadingSchema = z
-  .object({
-    id: idSchema,
-    year: yearSchema,
-    month: monthSchema,
-    previousReading: meterValue,
-    currentReading: meterValue,
-    kwhPriceMicros: kwhPrice,
-    reserveFundCents: cents,
-    paid: z.boolean(),
-    confirmPreviousChange: z.boolean().optional(),
-  })
+  .object({ id: idSchema, ...readingValues, paid: z.boolean() })
   .refine(consumptionRule.check, consumptionRule.params)
+  .refine(rangeRule.check, rangeRule.params)
 export type UpdateReadingInput = z.input<typeof updateReadingSchema>
-
-export const monthEntriesSchema = z.object({
-  year: yearSchema,
-  month: monthSchema,
-  /** The month's values; unpaid bills of the month follow them. */
-  rates: monthRatesSchema,
-  entries: z
-    .array(
-      z.object({
-        propertyId: idSchema,
-        currentReading: meterValue,
-        /** Only needed for the very first reading of a chácara. */
-        previousReading: meterValue.optional(),
-      }),
-    )
-    .max(500),
-})
-export type MonthEntriesInput = z.input<typeof monthEntriesSchema>
 
 export const setPaidSchema = z.object({ id: idSchema, paid: z.boolean() })
 

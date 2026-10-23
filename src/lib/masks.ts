@@ -20,6 +20,21 @@ export function formatCep(value: string): string {
 }
 
 /**
+ * "10092026" → "10/09/2026": the slashes appear while typing. A slash typed
+ * after a single digit pads it ("1/" → "01").
+ */
+export function formatDateTyping(value: string): string {
+  const padded = value.replace(
+    /(^|\/)(\d)\/$/,
+    (_, before: string, digit: string) => `${before}0${digit}/`,
+  )
+  const digits = digitsOf(padded).slice(0, 8)
+  if (digits.length <= 2) return digits
+  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`
+  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`
+}
+
+/**
  * CPF and CNPJ get their usual punctuation; anything else (RG, passport) is
  * kept exactly as typed.
  */

@@ -5,17 +5,12 @@ import path from 'node:path'
 import { asc, eq } from 'drizzle-orm'
 import { strToU8, zipSync } from 'fflate'
 import { openDatabase } from '#/db/client.server'
-import {
-  appPassword,
-  monthRates,
-  owners,
-  properties,
-  readings,
-} from '#/db/schema'
+import { appPassword, owners, periods, properties, readings } from '#/db/schema'
 import { setAppPassword } from './auth.server'
 import {
   describeLegacyImport,
   importLegacy,
+  legacyEnergyCents,
   legacyMoneyToCents,
   legacyPriceToMicros,
   legacyPropertyName,
@@ -26,27 +21,34 @@ import {
   readLegacyZip,
 } from './legacy.server'
 import { createOwner } from './owners.server'
+import { getPropertySheet } from './readings.server'
 
 describe('parseLegacyPeriod', () => {
+  const range = (startDate: string, endDate: string) => ({ startDate, endDate })
+
   test.each([
-    ['10 Jan/10 Fev 2007', 2007, { year: 2007, month: 2 }],
-    ['10 Abr/ 10Mai 2007', 2007, { year: 2007, month: 5 }],
-    ['10 Abr/10  Mai 2007', 2007, { year: 2007, month: 5 }],
-    ['10 Nov 07/ 10 Jan 08', 2007, { year: 2008, month: 1 }],
-    ['10 Dez 08 / 10 jan 09', 2009, { year: 2009, month: 1 }],
-    ['10 Jun 08 / 10 Lul 08', 2008, { year: 2008, month: 7 }],
-    ['10  Fev 08 /10 Mar 08', 2008, { year: 2008, month: 3 }],
-    ['10 Set 08 / 10 dez 08', 2008, { year: 2008, month: 12 }],
-    ['10 Out / 10 Nov 2007', 2007, { year: 2007, month: 11 }],
+    ['10 Jan/10 Fev 2007', 2007, range('2007-01-10', '2007-02-10')],
+    ['10 Abr/ 10Mai 2007', 2007, range('2007-04-10', '2007-05-10')],
+    ['10 Abr/10  Mai 2007', 2007, range('2007-04-10', '2007-05-10')],
+    ['10 Nov 07/ 10 Jan 08', 2007, range('2007-11-10', '2008-01-10')],
+    ['10 Dez 08 / 10 jan 09', 2009, range('2008-12-10', '2009-01-10')],
+    ['10 Jun 08 / 10 Lul 08', 2008, range('2008-06-10', '2008-07-10')],
+    ['10  Fev 08 /10 Mar 08', 2008, range('2008-02-10', '2008-03-10')],
+    ['10 Set 08 / 10 dez 08', 2008, range('2008-09-10', '2008-12-10')],
+    ['10 Out / 10 Nov 2007', 2007, range('2007-10-10', '2007-11-10')],
+    ['10 Dez / 10 Jan 2009', 2009, range('2008-12-10', '2009-01-10')],
+    ['15 Jan/12 Fev 2007', 2007, range('2007-01-15', '2007-02-12')],
   ])('%p → %p', (mes, fallback, expected) => {
     expect(parseLegacyPeriod(mes, fallback)).toEqual(expected)
   })
 
-  test('falls back to the year column when the text has none', () => {
-    expect(parseLegacyPeriod('10 Jan / 10 Fev', 2008)).toEqual({
-      year: 2008,
-      month: 2,
-    })
+  test('falls back to the year column and to a month before', () => {
+    expect(parseLegacyPeriod('10 Jan / 10 Fev', 2008)).toEqual(
+      range('2008-01-10', '2008-02-10'),
+    )
+    expect(parseLegacyPeriod('Fev 2008', null)).toEqual(
+      range('2008-01-10', '2008-02-10'),
+    )
     expect(parseLegacyPeriod('', 2008)).toBeNull()
   })
 })
@@ -61,6 +63,13 @@ describe('legacy values', () => {
     expect(legacyPriceToMicros('0.34999999')).toBe(350000)
     expect(legacyPriceToMicros('0.34')).toBe(340000)
     expect(legacyMoneyToCents('10')).toBe(1000)
+  })
+
+  test('energy charged as the old app did: m³ × price per m³', () => {
+    // Feb 2007: 461 − 366 = 95 m³ × R$ 0,34 = R$ 32,30.
+    expect(legacyEnergyCents(95, 340000)).toBe(3230)
+    // 1 m³ × R$ 0,875 = 87,5 centavos → 88.
+    expect(legacyEnergyCents(1, 875000)).toBe(88)
   })
 
   test('chácara names come from the address column', () => {
@@ -134,81 +143,130 @@ describe('importLegacy', () => {
     ])
   })
 
-  test('readings keep the price and fund they were billed with', () => {
+  test('each month becomes a period, and readings keep what they charged', () => {
     const db = openDatabase(':memory:')
     expect(importLegacy(db, legacyExport()).readings).toBe(3)
 
+    // The bill of each period is what the old app charged for energy.
+    expect(
+      db
+        .select({
+          startDate: periods.startDate,
+          endDate: periods.endDate,
+          bill: periods.energyBillCents,
+          fund: periods.reserveFundCents,
+        })
+        .from(periods)
+        .orderBy(asc(periods.startDate))
+        .all(),
+    ).toEqual([
+      {
+        startDate: '2007-01-10',
+        endDate: '2007-02-10',
+        bill: 700 + 350,
+        fund: 1000,
+      },
+      {
+        startDate: '2007-02-10',
+        endDate: '2007-03-10',
+        bill: 1020,
+        fund: 1000,
+      },
+    ])
     expect(
       db
         .select({
           propertyId: readings.propertyId,
-          year: readings.year,
-          month: readings.month,
+          periodId: readings.periodId,
           previous: readings.previousReading,
           current: readings.currentReading,
-          price: readings.kwhPriceMicros,
+          energy: readings.energyCents,
           fund: readings.reserveFundCents,
           paid: readings.paid,
-          readingDate: readings.readingDate,
+          startDate: readings.startDate,
+          endDate: readings.endDate,
           notes: readings.notes,
         })
         .from(readings)
-        .orderBy(asc(readings.id))
+        .orderBy(asc(readings.propertyId), asc(readings.periodId))
         .all(),
     ).toEqual([
       {
         propertyId: 1,
-        year: 2007,
-        month: 2,
+        periodId: 1,
         previous: 100,
         current: 120,
-        price: 350000,
+        // 20 m³ × R$ 0,35
+        energy: 700,
         fund: 1000,
         paid: true,
-        readingDate: '2007-02-15',
+        startDate: null,
+        endDate: null,
         notes:
           'Período no sistema antigo: 10 Jan/10 Fev 2007, vencimento 20/02/2007',
       },
       {
         propertyId: 1,
-        year: 2007,
-        month: 3,
+        periodId: 2,
         previous: 120,
         current: 150,
-        price: 340000,
+        // 30 m³ × R$ 0,34
+        energy: 1020,
         fund: 1000,
         paid: false,
-        readingDate: '2007-03-15',
+        startDate: null,
+        endDate: null,
         notes: 'Período no sistema antigo: 10 Fev/10 Mar 2007',
       },
       {
         propertyId: 2,
-        year: 2007,
-        month: 2,
+        periodId: 1,
         previous: 50,
         current: 60,
-        price: 350000,
+        energy: 350,
         fund: 1000,
         paid: true,
-        readingDate: '2007-02-15',
+        startDate: null,
+        endDate: null,
         notes: 'Período no sistema antigo: 10 Jan/10 Fev 2007',
       },
     ])
-    // Each month gets the values most of its bills used.
+  })
+
+  test('a chácara read over two months keeps its dates', () => {
+    const db = openDatabase(':memory:')
+    importLegacy(db, {
+      users: parseLegacyCsv(USERS),
+      invoices: parseLegacyCsv(INVOICES),
+      consumption:
+        parseLegacyCsv(`CodigoCosumo,NumeroFatura,LeituraAtual,LeituraAnterior,Valor,Fundo,Mes,Data,Vencimento,Quitado,Ano
+20,2,40,30,0.35,10,"10 Ago 08 / 10 Set 08","09/20/08 00:00:00",,1,"2008"
+21,1,110,100,0.35,10,"10 Set 08 / 10 Out 08","10/20/08 00:00:00",,1,"2008"
+22,1,130,110,0.35,10,"10 Out 08 / 10 Dez 08","12/20/08 00:00:00",,0,"2008"
+23,2,70,40,0.35,10,"10 Set 08 / 10 Dez 08","12/20/08 00:00:00",,0,"2008"
+`),
+    })
+
     expect(
       db
-        .select({
-          year: monthRates.year,
-          month: monthRates.month,
-          price: monthRates.kwhPriceMicros,
-          fund: monthRates.reserveFundCents,
-        })
-        .from(monthRates)
-        .orderBy(asc(monthRates.year), asc(monthRates.month))
+        .select({ startDate: periods.startDate, endDate: periods.endDate })
+        .from(periods)
+        .orderBy(asc(periods.startDate))
         .all(),
     ).toEqual([
-      { year: 2007, month: 2, price: 350000, fund: 1000 },
-      { year: 2007, month: 3, price: 340000, fund: 1000 },
+      { startDate: '2008-08-10', endDate: '2008-09-10' },
+      { startDate: '2008-09-10', endDate: '2008-10-10' },
+      { startDate: '2008-10-10', endDate: '2008-12-10' },
+    ])
+    // Chácara 9 wasn't read in October: its December reading spans both.
+    expect(
+      getPropertySheet(db, 2)?.readings.map(({ startDate, endDate }) => ({
+        startDate,
+        endDate,
+      })),
+    ).toEqual([
+      { startDate: '2008-08-10', endDate: '2008-09-10' },
+      { startDate: '2008-09-10', endDate: '2008-12-10' },
     ])
   })
 
@@ -222,7 +280,7 @@ describe('importLegacy', () => {
         '4 registros não importados:',
         '  - registro 13: sem leitura',
         '  - registro 14: leitura atual menor que a anterior',
-        '  - registro 15: Chácara 9 já tem leitura de Fevereiro de 2007',
+        '  - registro 15: Chácara 9 já tem leitura no período de 10/01/2007 a 10/02/2007',
         '  - registro 16: fatura 3 sem usuário',
       ].join('\n'),
     )
@@ -314,7 +372,7 @@ describe('importing over existing data', () => {
     owners: db.select().from(owners).all().length,
     properties: db.select().from(properties).all().length,
     readings: db.select().from(readings).all().length,
-    monthRates: db.select().from(monthRates).all().length,
+    periods: db.select().from(periods).all().length,
   })
 
   test('the same export again adds nothing and changes nothing', () => {
@@ -337,7 +395,7 @@ describe('importing over existing data', () => {
     ])
   })
 
-  test('a chácara typed in the app gets only the months it lacks', () => {
+  test('a chácara typed in the app gets only the periods it lacks', () => {
     const db = openDatabase(':memory:')
     const owner = createOwner(db, {
       name: 'Dona Exemplo',
@@ -351,14 +409,24 @@ describe('importing over existing data', () => {
       .values({ name: 'chacara  7', ownerId: owner.id })
       .returning()
       .get()
+    // March 2007 typed in the app, on other dates.
+    const march = db
+      .insert(periods)
+      .values({
+        startDate: '2007-02-12',
+        endDate: '2007-03-12',
+        energyBillCents: 3600,
+        reserveFundCents: 1500,
+      })
+      .returning()
+      .get()
     db.insert(readings)
       .values({
         propertyId: typed.id,
-        year: 2007,
-        month: 3,
+        periodId: march.id,
         previousReading: 120,
         currentReading: 160,
-        kwhPriceMicros: 900000,
+        energyCents: 3600,
         reserveFundCents: 1500,
       })
       .run()
@@ -379,21 +447,24 @@ describe('importing over existing data', () => {
         .orderBy(asc(owners.id))
         .all(),
     ).toEqual([{ name: 'Dona Exemplo' }, { name: 'Quirino Exemplo' }])
+    // February came; March stays as it was typed, in the app's period.
     expect(
       db
         .select({
-          month: readings.month,
+          period: periods.endDate,
           current: readings.currentReading,
-          price: readings.kwhPriceMicros,
+          energy: readings.energyCents,
         })
         .from(readings)
+        .innerJoin(periods, eq(periods.id, readings.periodId))
         .where(eq(readings.propertyId, typed.id))
-        .orderBy(asc(readings.month))
+        .orderBy(asc(periods.startDate))
         .all(),
     ).toEqual([
-      { month: 2, current: 120, price: 350000 },
-      { month: 3, current: 160, price: 900000 },
+      { period: '2007-02-10', current: 120, energy: 700 },
+      { period: '2007-03-12', current: 160, energy: 3600 },
     ])
+    expect(db.select().from(periods).all()).toHaveLength(2)
   })
 
   test('a renamed chácara is still found by its meter', () => {

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   formatCep,
+  formatDateTyping,
   formatDocument,
   formatPhone,
   matchesSearch,
@@ -20,6 +21,15 @@ describe('masks', () => {
   test('formats CEP', () => {
     expect(formatCep('13250')).toBe('13250')
     expect(formatCep('13250000')).toBe('13250-000')
+  })
+
+  test('formats dates while typing', () => {
+    expect(formatDateTyping('1')).toBe('1')
+    expect(formatDateTyping('100')).toBe('10/0')
+    expect(formatDateTyping('10092026')).toBe('10/09/2026')
+    expect(formatDateTyping('10/09/20261')).toBe('10/09/2026')
+    expect(formatDateTyping('1/')).toBe('01')
+    expect(formatDateTyping('01/9/')).toBe('01/09')
   })
 
   test('formats CPF and CNPJ, keeps other documents', () => {
