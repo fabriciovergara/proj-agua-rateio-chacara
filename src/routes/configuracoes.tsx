@@ -691,9 +691,9 @@ function ImportSection() {
               “Baixar cópia dos dados”, deste app ou de outro.
             </li>
             <li>
-              <strong>Dados do sistema antigo</strong> (.zip): os arquivos
-              T_Usuarios.csv, T_Fatura.csv e T_Consumo.csv do programa em
-              Access.
+              <strong>Dados do sistema antigo</strong> (.mdb ou .zip): o arquivo
+              do programa em Access (como Agua.mdb), sozinho ou num .zip, ou um
+              .zip com T_Usuarios.csv, T_Fatura.csv e T_Consumo.csv.
             </li>
           </ul>
           <p className="text-muted-foreground">
@@ -702,7 +702,7 @@ function ImportSection() {
           </p>
           <div className="flex max-w-md flex-col gap-2">
             <Label htmlFor={inputId} className="text-base">
-              Arquivo .sqlite ou .zip
+              Arquivo .sqlite, .mdb ou .zip
             </Label>
             {/* No `accept`: iPhones grey out .sqlite files they don't know. */}
             <Input
@@ -759,6 +759,13 @@ function ImportSummary({ result }: { result: Imported }) {
       <AlertTitle className="text-base">Importação concluída</AlertTitle>
       <AlertDescription className="text-base text-foreground">
         <ul className="list-disc space-y-1 pl-5">
+          {result.from === 'legacy' && result.olderCopies.length > 0 && (
+            <li>
+              O .zip tinha mais de um arquivo do Access: entrou só{' '}
+              {result.database}, o de leituras mais recentes. Ficou de fora:{' '}
+              {listOf(result.olderCopies)}.
+            </li>
+          )}
           <li>{listOf(added)}.</li>
           {extras.length > 0 && <li>Vieram também {listOf(extras)}.</li>}
           {(result.matched > 0 || result.existing > 0) && (

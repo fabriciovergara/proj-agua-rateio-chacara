@@ -6,7 +6,13 @@ import { UserFacingError } from '#/lib/errors'
 import * as auth from './auth.server'
 import { importBackup, isSqliteFile, readBackup } from './backup.server'
 import { deleteAllData } from './data.server'
-import { importLegacy, readLegacyZip } from './legacy.server'
+import {
+  importLegacy,
+  isAccessFile,
+  type LegacyExport,
+  readLegacyMdb,
+  readLegacyZip,
+} from './legacy.server'
 
 /*
  * Configurações options for whoever runs the server: importing data and
@@ -24,16 +30,16 @@ const requireEnvPassword = createMiddleware({ type: 'function' }).server(
   },
 )
 
-/** Backups have a few hundred KB, the old app's .zip well under 1 MB. */
+/** Backups have a few hundred KB, the old app's .mdb about 1 MB. */
 const MAX_FILE_BYTES = 20 * 1024 * 1024
 
 /** Every .zip starts with "PK". */
 const isZipFile = (bytes: Uint8Array) => bytes[0] === 0x50 && bytes[1] === 0x4b
 
 /**
- * "Importar dados": a backup made by "Cópia de segurança" or the .zip with
- * the CSVs of the old Access app. Either way only what the app doesn't have
- * yet comes in.
+ * "Importar dados": a backup made by "Cópia de segurança" or the old Access
+ * app's data (its .mdb, or a .zip with it or with its CSVs). Either way only
+ * what the app doesn't have yet comes in.
  */
 export const importData = createServerFn({ method: 'POST' })
   .middleware([requireEnvPassword])
@@ -41,7 +47,7 @@ export const importData = createServerFn({ method: 'POST' })
     const file = data instanceof FormData ? data.get('arquivo') : null
     if (!(file instanceof File) || file.size === 0) {
       throw new UserFacingError(
-        'Escolha o arquivo: a cópia de segurança ou o .zip do sistema antigo.',
+        'Escolha o arquivo: a cópia de segurança ou os dados do sistema antigo.',
       )
     }
     if (file.size > MAX_FILE_BYTES) {
@@ -57,14 +63,16 @@ export const importData = createServerFn({ method: 'POST' })
         ...importBackup(getDb(), readBackup(bytes)),
       }
     }
-    if (isZipFile(bytes)) {
-      return {
-        from: 'legacy' as const,
-        ...importLegacy(getDb(), readLegacyZip(bytes)),
-      }
-    }
+    const legacy = (old: LegacyExport) => ({
+      from: 'legacy' as const,
+      ...importLegacy(getDb(), old),
+      database: old.database,
+      olderCopies: old.olderCopies ?? [],
+    })
+    if (isZipFile(bytes)) return legacy(readLegacyZip(bytes))
+    if (isAccessFile(bytes)) return legacy(readLegacyMdb(bytes, data.name))
     throw new UserFacingError(
-      'Este arquivo não é uma cópia de segurança nem o .zip do sistema antigo.',
+      'Este arquivo não é uma cópia de segurança nem os dados do sistema antigo (.mdb ou .zip).',
     )
   })
 
