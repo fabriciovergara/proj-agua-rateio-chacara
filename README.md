@@ -67,7 +67,7 @@ migrations run automatically.
 | `bun run db:generate` | New migration after changing `src/db/schema.ts` |
 | `bun run db:migrate` | Create/upgrade the database without starting the app |
 | `bun run db:seed [--reset]` | Demo data (refuses to run on a non-empty database without `--reset`) |
-| `bun run db:import-legacy <folder> [--reset]` | Import the old Access data (adds what's missing; `--reset` wipes the data first) |
+| `bun run db:import-legacy <file or folder> [--reset]` | Import the old Access data: the `.mdb`, a `.zip` or a folder with the CSVs (adds what's missing; `--reset` wipes the data first) |
 | `bun run db:studio` | Drizzle Studio |
 
 ### Environment variables
@@ -81,10 +81,25 @@ migrations run automatically.
 
 ## Importing the old Access data
 
-Export the three tables of `Kw.mdb` to CSV (for example with
-[mdbtools](https://github.com/mdbtools/mdbtools)) into a folder **outside the
-repository or under `legacy/`** (git-ignored — the data has personal
-information and this repository is public):
+In the app, **Configurações → Importar dados** (only when unlocked with
+`APP_PASSWORD`): send the old app's database (`Agua.mdb`, earlier `Kw.mdb`),
+by itself or in a `.zip` (in any folder of it). A `.zip` with more than one
+Access database (the app next to an old copy) brings in only the one with the
+most recent readings and says which ones it left out; other files, like the
+`.ldb` lock file, are ignored. The `.mdb` is read in the server (with
+[mdb-reader](https://github.com/andipaetzold/mdb-reader)), nothing to install.
+
+Or with the script, keeping the files **outside the repository or under
+`legacy/`** (git-ignored — the data has personal information and this
+repository is public):
+
+```bash
+bun run db:import-legacy legacy/Agua.mdb    # or the .zip
+```
+
+A `.zip` or a folder with the three tables exported to CSV (for example with
+[mdbtools](https://github.com/mdbtools/mdbtools)) works too, and the CSVs win
+when a `.zip` has both; CSVs saved as Windows-1252 instead of UTF-8 are fine:
 
 ```bash
 mdb-export Kw.mdb T_Usuarios > legacy/T_Usuarios.csv
@@ -93,27 +108,31 @@ mdb-export Kw.mdb T_Cosumo   > legacy/T_Consumo.csv
 bun run db:import-legacy legacy
 ```
 
-Or, in the app, **Configurações → Importar dados** (only when unlocked with
-`APP_PASSWORD`): send a `.zip` with the three CSVs (in any folder of it; other
-files, like `Kw.mdb`, are ignored). CSVs saved as Windows-1252 instead of
-UTF-8 work too.
-
 Each old user becomes an owner and a chácara (the chácara number is taken from
-the old address column), and each consumption row becomes a reading that
-keeps what it was charged (m³ × the old price per m³, plus the fund). Rows are
-grouped into periods by the month their dates end in ("10 Nov 07 / 10 Jan 08"
-→ the period ending on 10/01/2008); a period's electricity bill is what its
-readings charged for energy, and a chácara read on other dates ("10 Set 08 /
-10 Dez 08") keeps them. Rows without readings are skipped and listed.
+the old address column; longer numbers there are phones or CEPs), and each
+consumption row becomes a reading that keeps what it was charged (m³ × the
+old price per m³, plus the fund). Old users registered again with the same
+meter are one chácara. The period of a row is read from what was typed in the
+old app, "10 Nov 07 / 10 Jan 08" in the first years and "10/10/09 a 08/02/10"
+later, typos included ("18//7/17", "06/922"; a year typed wrong, like
+"21/7/14 a 21/10/47", is told by the day the row was entered). Rows are
+grouped into periods by round of readings: periods ending up to 15 days apart
+are one round (the meters of a round were read within about a week, and
+rounds were at least three weeks apart). A period's electricity bill is what
+its readings charged for energy, and a chácara read on other dates ("10 Set
+08 / 10 Dez 08") keeps them. A chácara with two rows in a round keeps the last
+one entered (the old app's corrections were typed again); rows without
+readings, or with a reading lower than the one before, are skipped.
+Everything left out is listed.
 
 Importing again, or into a database that already has data, only adds what is
 missing, and nothing already there changes. An old user whose chácara is
 already in the app keeps it: imported before (the owner's notes keep the old
 code), or with the same name or meter number. A period of the app ending in
-the same month is the same period, and a chácara that already has a reading
-in it keeps it. A name or meter shared by two chácaras in the app is
-reported instead of guessed. `--reset` wipes the data first, like
-**Apagar todos os dados** in the app; the password stays.
+the same round (up to 15 days apart) is the same period, and a chácara that
+already has a reading in it keeps it. A name or meter shared by two chácaras
+in the app is reported instead of guessed. `--reset` wipes the data first,
+like **Apagar todos os dados** in the app; the password stays.
 
 The old data only comes in through these two imports, never on its own (not
 even into an empty database), so data wiped with **Apagar todos os dados**
