@@ -36,6 +36,13 @@
       "when": 1792755968000,
       "tag": "0004_periods",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1793632480943,
+      "tag": "0005_tank_readings",
+      "breakpoints": true
     }
   ]
 }

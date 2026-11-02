@@ -123,6 +123,15 @@ export function addMonthsToDate(iso: string, months: number): string {
   )
 }
 
+/** Whole days from one date to another: 10/09 → 10/10 is 30. */
+export function daysBetween(startDate: string, endDate: string): number {
+  const utc = (iso: string) => {
+    const { year, month, day } = partsOf(iso)
+    return Date.UTC(year, month - 1, day)
+  }
+  return Math.round((utc(endDate) - utc(startDate)) / 86_400_000)
+}
+
 /**
  * The bills of a period are due on `dueDay` of the month after the period
  * ends (clamped to the month's length: day 31 in February becomes 28/29).

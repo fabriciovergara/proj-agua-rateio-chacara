@@ -3,6 +3,7 @@ import { getRequest } from '@tanstack/react-start/server'
 import { z } from 'zod'
 import { getDb } from '#/db/client.server'
 import { UserFacingError } from '#/lib/errors'
+import { todayISO } from '#/lib/periods'
 import * as auth from './auth.server'
 import { importBackup, isSqliteFile, readBackup } from './backup.server'
 import { deleteAllData } from './data.server'
@@ -13,6 +14,7 @@ import {
   readLegacyMdb,
   readLegacyZip,
 } from './legacy.server'
+import { importTankSheet, readTankSheet } from './tank-import.server'
 
 /*
  * Configurações options for whoever runs the server: importing data and
@@ -37,8 +39,9 @@ const MAX_FILE_BYTES = 20 * 1024 * 1024
 const isZipFile = (bytes: Uint8Array) => bytes[0] === 0x50 && bytes[1] === 0x4b
 
 /**
- * "Importar dados": a backup made by "Cópia de segurança" or the old Access
- * app's data (its .mdb, or a .zip with it or with its CSVs). Either way only
+ * "Importar dados": a backup made by "Cópia de segurança", the old Access
+ * app's data (its .mdb, or a .zip with it or with its CSVs) or a spreadsheet
+ * with the caixa d'água's readings (.xlsx, itself a .zip). Either way only
  * what the app doesn't have yet comes in.
  */
 export const importData = createServerFn({ method: 'POST' })
@@ -47,7 +50,7 @@ export const importData = createServerFn({ method: 'POST' })
     const file = data instanceof FormData ? data.get('arquivo') : null
     if (!(file instanceof File) || file.size === 0) {
       throw new UserFacingError(
-        'Escolha o arquivo: a cópia de segurança ou os dados do sistema antigo.',
+        'Escolha o arquivo: a cópia de segurança, os dados do sistema antigo ou a planilha da caixa d’água.',
       )
     }
     if (file.size > MAX_FILE_BYTES) {
@@ -69,10 +72,20 @@ export const importData = createServerFn({ method: 'POST' })
       database: old.database,
       olderCopies: old.olderCopies ?? [],
     })
-    if (isZipFile(bytes)) return legacy(readLegacyZip(bytes))
+    if (isZipFile(bytes)) {
+      const sheet = readTankSheet(bytes)
+      if (sheet) {
+        return {
+          from: 'tank' as const,
+          sheet: sheet.sheet,
+          ...importTankSheet(getDb(), sheet, todayISO()),
+        }
+      }
+      return legacy(readLegacyZip(bytes))
+    }
     if (isAccessFile(bytes)) return legacy(readLegacyMdb(bytes, data.name))
     throw new UserFacingError(
-      'Este arquivo não é uma cópia de segurança nem os dados do sistema antigo (.mdb ou .zip).',
+      'Este arquivo não é uma cópia de segurança, nem os dados do sistema antigo (.mdb ou .zip), nem uma planilha (.xlsx).',
     )
   })
 

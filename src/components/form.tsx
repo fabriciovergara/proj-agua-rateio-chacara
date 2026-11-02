@@ -258,15 +258,36 @@ export const meterInputClass =
   'h-auto min-h-13 rounded-md border-2 border-counter bg-counter px-3 py-1.5 text-right font-mono text-[1.55rem] font-semibold tracking-[0.14em] text-white tabular-nums shadow-[inset_0_2px_0_rgb(0_0_0/0.35)] placeholder:text-[#7d8699] focus-visible:border-ring focus-visible:ring-ring/60 aria-invalid:border-[#f2867d] aria-invalid:ring-2 aria-invalid:ring-destructive data-[dirty=true]:border-ring md:text-[1.55rem]'
 
 /**
+ * Digits, and with `decimals` a comma and up to that many digits after it.
+ * The last comma or dot is the decimal one (phones may only have the dot).
+ */
+function meterDigits(text: string, decimals: number): string {
+  const digits = (part: string) => part.replace(/\D/g, '')
+  if (decimals === 0) return digits(text).slice(0, 9)
+  const at = Math.max(text.lastIndexOf(','), text.lastIndexOf('.'))
+  if (at === -1) return digits(text).slice(0, 9)
+  const whole = digits(text.slice(0, at)).slice(0, 9)
+  return `${whole},${digits(text.slice(at + 1)).slice(0, decimals)}`
+}
+
+/** "12296,5" → "12.296,5" */
+function meterText(value: string): string {
+  const [whole = '', fraction] = value.split(',')
+  return `${formatNumber(Number(whole))}${fraction ? `,${fraction}` : ''}`
+}
+
+/**
  * Digits only. While typing the digits are plain; afterwards they get
  * thousands separators like the rest of the screen ("12296" → "12.296").
- * `plain` drops the meter's counter look (for "Última leitura").
+ * `plain` drops the meter's counter look (for "Última leitura"). With
+ * `decimals`, the liters may follow a comma ("1254,37").
  */
 export function MeterInput({
   value,
   onChange,
   dirty,
   look = 'counter',
+  decimals = 0,
   className,
   ...props
 }: {
@@ -274,11 +295,12 @@ export function MeterInput({
   onChange: (value: string) => void
   dirty?: boolean
   look?: 'counter' | 'plain'
+  decimals?: number
   className?: string
 } & Omit<ComponentProps<'input'>, 'value' | 'onChange'>) {
   const [editing, setEditing] = useState(false)
   const ref = useRef<HTMLInputElement>(null)
-  const shown = editing || value === '' ? value : formatNumber(Number(value))
+  const shown = editing || value === '' ? value : meterText(value)
 
   // Switching to the plain digits drops the selection; select again so that
   // typing replaces the number (as in a spreadsheet) instead of appending.
@@ -291,9 +313,9 @@ export function MeterInput({
       {...props}
       ref={ref}
       className={cn(look === 'counter' && meterInputClass, className)}
-      inputMode="numeric"
+      inputMode={decimals ? 'decimal' : 'numeric'}
       autoComplete="off"
-      maxLength={11}
+      maxLength={decimals ? 12 + decimals : 11}
       data-dirty={dirty || undefined}
       value={shown}
       onFocus={(event) => {
@@ -304,9 +326,7 @@ export function MeterInput({
         setEditing(false)
         props.onBlur?.(event)
       }}
-      onChange={(event) =>
-        onChange(event.target.value.replace(/\D/g, '').slice(0, 9))
-      }
+      onChange={(event) => onChange(meterDigits(event.target.value, decimals))}
     />
   )
 }

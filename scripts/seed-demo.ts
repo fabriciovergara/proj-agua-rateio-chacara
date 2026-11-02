@@ -1,7 +1,7 @@
 /**
  * Fills the database with fictitious chácaras, owners and 18 monthly
- * periods of water meter readings, so the app can be explored before real
- * data is typed in.
+ * periods of water meter readings (and the caixa d'água's), so the app can
+ * be explored before real data is typed in.
  *
  *   bun run db:seed            # only on an empty database
  *   bun run db:seed --reset    # wipes everything first
@@ -15,6 +15,7 @@ import {
   properties,
   readings,
   settings,
+  tankReadings,
 } from '#/db/schema'
 import { addMonthsToDate, todayISO } from '#/lib/periods'
 import { deleteAllData } from '#/server/data.server'
@@ -151,6 +152,16 @@ db.transaction((tx) => {
     }
   })
 
+  // The caixa d'água is read with the chácaras, from 48.250,375 m³.
+  let tank = 48_250_375
+  const firstPeriod = created[0]
+  if (firstPeriod) {
+    tx.insert(tankReadings)
+      .values({ date: firstPeriod.startDate, readingLiters: tank })
+      .run()
+  }
+  let lastWater = 0
+
   created.forEach((period, offset) => {
     const newest = offset === PERIODS - 1
     const month = Number(period.endDate.slice(5, 7))
@@ -179,6 +190,18 @@ db.transaction((tx) => {
       meter.reading += used
       water += used
     }
+
+    // What the chácaras used and about 4% lost on the way; a pipe leaked
+    // three and two periods ago. The newest period's chácaras aren't all
+    // read yet, but the caixa d'água is.
+    const lost = offset === PERIODS - 3 || offset === PERIODS - 2 ? 1.35 : 1.04
+    tank += Math.round(
+      (newest ? lastWater : water) * lost * 1000 + 371 * offset,
+    )
+    tx.insert(tankReadings)
+      .values({ date: period.endDate, readingLiters: tank })
+      .run()
+    if (!newest) lastWater = water
 
     // The pump's electricity bill: about R$ 1,60 per m³ pumped (R$ 1,85
     // from January), and the newest bill hasn't arrived yet.
@@ -219,5 +242,5 @@ db.transaction((tx) => {
 })
 
 console.log(
-  `Dados de exemplo criados: ${CHACARAS.length} chácaras com ${PERIODS} períodos de leituras.`,
+  `Dados de exemplo criados: ${CHACARAS.length} chácaras com ${PERIODS} períodos de leituras, e as leituras da caixa d’água.`,
 )

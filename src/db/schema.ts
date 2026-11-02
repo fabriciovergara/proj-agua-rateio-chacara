@@ -11,8 +11,9 @@ import { ACCOUNT_TYPES, PIX_KEY_TYPES } from '#/lib/domain'
 
 /*
  * Money is stored as integers to avoid floating point errors: values in R$
- * are stored in centavos (`*_cents`). Meter readings are whole m³, and dates
- * are ISO text (YYYY-MM-DD), which sorts and compares as dates.
+ * are stored in centavos (`*_cents`). Meter readings are whole m³ (the caixa
+ * d'água's, liters), and dates are ISO text (YYYY-MM-DD), which sorts and
+ * compares as dates.
  */
 
 const timestamps = {
@@ -199,9 +200,41 @@ export const readings = sqliteTable(
   ],
 )
 
+/**
+ * Readings of the meter of the water tank (caixa d'água) that supplies every
+ * chácara, on any day. All the water the chácaras' meters measure passed
+ * through it, so comparing the two shows water lost on the way (leaks).
+ */
+export const tankReadings = sqliteTable(
+  'tank_readings',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** When the meter was read (YYYY-MM-DD). */
+    date: text('date').notNull(),
+    /**
+     * What the meter shows, in liters (m³ × 1000): its red wheels count the
+     * liters, and they are written down too (1.254,37 m³).
+     */
+    readingLiters: integer('reading_liters').notNull(),
+    /**
+     * A new meter was installed since the reading before: the water used
+     * in between is unknown, and the count starts again here.
+     */
+    meterReplaced: integer('meter_replaced', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('tank_readings_date_uq').on(t.date),
+    check('tank_readings_reading_non_negative', sql`${t.readingLiters} >= 0`),
+  ],
+)
+
 export type Settings = typeof settings.$inferSelect
 export type Period = typeof periods.$inferSelect
 export type BankAccount = typeof bankAccount.$inferSelect
 export type Owner = typeof owners.$inferSelect
 export type Property = typeof properties.$inferSelect
 export type Reading = typeof readings.$inferSelect
+export type TankReading = typeof tankReadings.$inferSelect

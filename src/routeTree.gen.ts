@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as CadastrosRouteImport } from './routes/cadastros'
+import { Route as CaixaDaguaRouteImport } from './routes/caixa-dagua'
 import { Route as ConfiguracoesRouteImport } from './routes/configuracoes'
 import { Route as DesbloquearRouteImport } from './routes/desbloquear'
 import { Route as GraficosRouteImport } from './routes/graficos'
@@ -40,6 +41,11 @@ const IndexRoute = IndexRouteImport.update({
 const CadastrosRoute = CadastrosRouteImport.update({
   id: '/cadastros',
   path: '/cadastros',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CaixaDaguaRoute = CaixaDaguaRouteImport.update({
+  id: '/caixa-dagua',
+  path: '/caixa-dagua',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ConfiguracoesRoute = ConfiguracoesRouteImport.update({
@@ -149,6 +155,7 @@ const CadastrosProprietariosNovoRoute =
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/cadastros': typeof CadastrosRouteWithChildren
+  '/caixa-dagua': typeof CaixaDaguaRoute
   '/configuracoes': typeof ConfiguracoesRoute
   '/desbloquear': typeof DesbloquearRoute
   '/graficos': typeof GraficosRoute
@@ -172,6 +179,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/caixa-dagua': typeof CaixaDaguaRoute
   '/configuracoes': typeof ConfiguracoesRoute
   '/desbloquear': typeof DesbloquearRoute
   '/graficos': typeof GraficosRoute
@@ -196,6 +204,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/cadastros': typeof CadastrosRouteWithChildren
+  '/caixa-dagua': typeof CaixaDaguaRoute
   '/configuracoes': typeof ConfiguracoesRoute
   '/desbloquear': typeof DesbloquearRoute
   '/graficos': typeof GraficosRoute
@@ -222,6 +231,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/cadastros'
+    | '/caixa-dagua'
     | '/configuracoes'
     | '/desbloquear'
     | '/graficos'
@@ -245,6 +255,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/caixa-dagua'
     | '/configuracoes'
     | '/desbloquear'
     | '/graficos'
@@ -268,6 +279,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/cadastros'
+    | '/caixa-dagua'
     | '/configuracoes'
     | '/desbloquear'
     | '/graficos'
@@ -293,6 +305,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   CadastrosRoute: typeof CadastrosRouteWithChildren
+  CaixaDaguaRoute: typeof CaixaDaguaRoute
   ConfiguracoesRoute: typeof ConfiguracoesRoute
   DesbloquearRoute: typeof DesbloquearRoute
   GraficosRoute: typeof GraficosRoute
@@ -319,6 +332,13 @@ declare module '@tanstack/react-router' {
       path: '/cadastros'
       fullPath: '/cadastros'
       preLoaderRoute: typeof CadastrosRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/caixa-dagua': {
+      id: '/caixa-dagua'
+      path: '/caixa-dagua'
+      fullPath: '/caixa-dagua'
+      preLoaderRoute: typeof CaixaDaguaRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/configuracoes': {
@@ -507,6 +527,7 @@ const RelatoriosRouteWithChildren = RelatoriosRoute._addFileChildren(
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   CadastrosRoute: CadastrosRouteWithChildren,
+  CaixaDaguaRoute: CaixaDaguaRoute,
   ConfiguracoesRoute: ConfiguracoesRoute,
   DesbloquearRoute: DesbloquearRoute,
   GraficosRoute: GraficosRoute,
