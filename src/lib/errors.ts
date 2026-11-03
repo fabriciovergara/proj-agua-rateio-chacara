@@ -43,6 +43,11 @@ export function translateDatabaseError(error: unknown): never {
   if (message.includes('UNIQUE constraint failed: periods')) {
     throw new UserFacingError('Já existe um período começando nesta data.')
   }
+  if (message.includes('UNIQUE constraint failed: tank_readings')) {
+    throw new UserFacingError(
+      'Já existe uma leitura da caixa d’água nesta data.',
+    )
+  }
   if (message.includes('readings_consumption_non_negative')) {
     throw new UserFacingError(
       'A leitura atual não pode ser menor que a última leitura.',

@@ -12,12 +12,13 @@ action per screen, and plain words.
 | Screen | What for |
 | --- | --- |
 | **Leituras** (home) | Pick the billing period (DD/MM/AAAA to DD/MM/AAAA) with the arrows or the dropdown; "Novo período" starts the next one where the last one ended. Set the period's dates (they apply to every chácara), the pump's electricity bill (can wait until it arrives) and the reserve fund, then type each chácara's reading in m³, like on the meter's counter. "Última leitura" comes from the chácara's previous reading; correcting it corrects that reading too. A chácara read on other days gets its own dates ("Datas diferentes?"). The bill is split as you type: each chácara pays its share by m³ plus the fund. Mark bills as paid. |
+| **Caixa d’água** (`/caixa-dagua`) | The readings of the meter of the water tank that supplies every chácara, on any day, in m³ with the liters ("1254,37"). Each reading shows the water used since the one before, its pace a month, and what the chácaras' meters measured in the same days: a tank measuring clearly more is a **possible leak** (see [The caixa d’água](#the-caixa-dágua)). On top, the averages a month of the tank and of the chácaras over 12 months. Correct or delete readings; a reading far above the usual pace asks first. |
 | **Chácara** (`/chacaras/:id`) | The spreadsheet of one chácara: Período, Última leitura, Leitura atual, Consumo (m³), Energia, Fundo reserva, Total, Situação. Correct or delete rows, add readings in periods it lacks. |
 | **Histórico** | Every bill with filters (chácara, year, paid/pending) and a CSV export that opens in Excel. |
 | **Gráficos** | Energy cost per period (by chácara), water used per chácara and payments per period, each with a table view. |
 | **Relatórios** | "Cobranças do período": the bill of each chácara (owner, property, reading, how the electricity bill was split, bank details and a **Pix QR code with the amount**, plus a WhatsApp message), and the annual report per owner. Both print or save as PDF. |
 | **Cadastros** | Owners (name, document, contact, e-mail) and chácaras (name, address with CEP lookup, meter number, owner). Search by any field. |
-| **Configurações** | "Cobranças" (group name and due day), "Dados Bancários" (bank, branch, account, type, Pix key), "Senha de acesso" (the password that unlocks the app, see [Password](#password)) and a database backup download. Unlocked with `APP_PASSWORD`, also "Importar dados" (a backup or the old Access data, see [Backup and restore](#backup-and-restore) and [Importing the old Access data](#importing-the-old-access-data)) and "Apagar todos os dados". |
+| **Configurações** | "Cobranças" (group name and due day), "Dados Bancários" (bank, branch, account, type, Pix key), "Senha de acesso" (the password that unlocks the app, see [Password](#password)) and a database backup download. Unlocked with `APP_PASSWORD`, also "Importar dados" (a backup, the old Access data or a spreadsheet with the caixa d’água's readings, see [Backup and restore](#backup-and-restore), [Importing the old Access data](#importing-the-old-access-data) and [The caixa d’água](#the-caixa-dágua)) and "Apagar todos os dados". |
 
 Safety nets for non-technical users:
 
@@ -232,8 +233,9 @@ yet, like the old Access data: a chácara with the same name or meter is the
 same chácara and only gets the periods it lacks (its owner and readings stay
 as they are), a new chácara's owner is the proprietário with the same name if
 there is one, a period with the same dates is the same period (one whose dates
-overlap a period of the app is left out and reported), and "Cobranças" and
-"Dados Bancários" come only when the app has none. A copy made by an older
+overlap a period of the app is left out and reported), a caixa d’água reading
+comes for a day the app has none when it fits among the app's readings, and
+"Cobranças" and "Dados Bancários" come only when the app has none. A copy made by an older
 version of the app is brought up to date with the migrations on the way in
 (copies made by month become periods, see below); one made by a newer version
 is refused.
@@ -324,3 +326,41 @@ screen; if its "preço do kWh" was not really a price per m³, type the real
 electricity bill there and the unpaid bills follow.
 - The Pix QR code is a static BR Code (Banco Central EMV format with CRC16)
   carrying the bill amount; it needs the Pix key, the beneficiary name and city.
+
+### The caixa d’água
+
+All the water the chácaras' meters measure passed through the tank's meter
+first, so over the same days both should measure about the same
+(`src/lib/tank.ts`):
+
+- The tank is read on any day; its readings are stored in liters (m³ ×
+  1000), since its meter shows them. One reading per day, each one not lower
+  than the one before, unless "Hidrômetro trocado": then the water used
+  between the two is unknown and left out of everything. After any change,
+  deletion or import, a reading counts as a new meter exactly when it is
+  lower than the one now before it.
+- Each stretch between two readings of the tank is compared with what the
+  chácaras' meters measured in the same days. Their readings rarely fall on
+  the same days, so a reading partly inside the stretch counts by its days,
+  as if the water had been used evenly (shown as an estimate, `*`). Reading
+  the tank on the same day as the chácaras makes it exact.
+- The chácaras' side is known when every active chácara was read up to the
+  end of the stretch, or up to a week before it (then the last reading's
+  pace fills the gap). A chácara first read later counts from then, an
+  inactive one up to its last reading, and an active one never read counts
+  as missing once it was registered before the stretch ended. Before the
+  chácaras' first readings there is nothing to compare.
+- **Diferença** = tank − chácaras, in whole m³. Up to 10% of the tank's
+  m³, or 10 m³, is normal (the meters aren't exact, the chácaras' show whole
+  m³ and aren't all read at the same moment). More on the tank's side is a
+  **possible leak**; more on the chácaras' side, a reading to check.
+- **Por mês** = m³ ÷ days × 30,44 (an average month). The averages on top
+  cover the 12 months up to the newest reading that could be compared (or
+  since the tank's first reading), the same days for the tank and the
+  chácaras.
+- Old readings come in through **Configurações → Importar dados**
+  (`APP_PASSWORD`): an Excel spreadsheet (.xlsx) with a "Data" row and a
+  "Leitura" row, the readings side by side, or two such columns. Dates may
+  be typed (DD/MM/AAAA) or Excel dates, readings numbers or text ("1.254,37").
+  Only days the app has no reading for come in, when they fit among its
+  readings; the rest is listed.

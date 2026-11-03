@@ -22,6 +22,7 @@ import {
   properties,
   readings,
   settings,
+  tankReadings,
 } from '#/db/schema'
 import { createSession, setAppPassword } from './auth.server'
 import { createBackup, importBackup, readBackup } from './backup.server'
@@ -136,6 +137,14 @@ async function sourceApp() {
       reading(onze?.id, feb?.id, 500, 520, 2000),
     ])
     .run()
+  db.insert(tankReadings)
+    .values([
+      { date: '2026-01-10', readingLiters: 8_000_000 },
+      { date: '2026-02-10', readingLiters: 8_090_500 },
+      // A new meter.
+      { date: '2026-03-10', readingLiters: 15_000, meterReplaced: true },
+    ])
+    .run()
   db.insert(settings)
     .values({ id: 1, groupName: 'Grupo Exemplo', dueDay: 10 })
     .run()
@@ -160,6 +169,11 @@ const contents = (db: DB) => ({
   properties: db.select().from(properties).orderBy(asc(properties.id)).all(),
   readings: db.select().from(readings).orderBy(asc(readings.id)).all(),
   periods: db.select().from(periods).orderBy(asc(periods.id)).all(),
+  tankReadings: db
+    .select()
+    .from(tankReadings)
+    .orderBy(asc(tankReadings.id))
+    .all(),
   settings: db.select().from(settings).all(),
   bank: db.select().from(bankAccount).all(),
 })
@@ -202,6 +216,7 @@ describe('importing a backup', () => {
       skipped: [],
       owners: 3,
       periods: 2,
+      tankReadings: 3,
       settings: true,
       bank: true,
     })
@@ -241,6 +256,11 @@ describe('importing a backup', () => {
       })
       .run()
     target.insert(settings).values({ id: 1, groupName: 'Outro grupo' }).run()
+    // The caixa d'água read in February, typed in the app.
+    target
+      .insert(tankReadings)
+      .values({ date: '2026-02-10', readingLiters: 8_100_000 })
+      .run()
 
     expect(importBackup(target, backup)).toEqual({
       created: 2,
@@ -250,9 +270,22 @@ describe('importing a backup', () => {
       skipped: [],
       owners: 1,
       periods: 1,
+      tankReadings: 2,
       settings: false,
       bank: true,
     })
+    // The app's February reading stays.
+    expect(
+      target
+        .select({ date: tankReadings.date, liters: tankReadings.readingLiters })
+        .from(tankReadings)
+        .orderBy(asc(tankReadings.date))
+        .all(),
+    ).toEqual([
+      { date: '2026-01-10', liters: 8_000_000 },
+      { date: '2026-02-10', liters: 8_100_000 },
+      { date: '2026-03-10', liters: 15_000 },
+    ])
 
     // The chácara typed in keeps its owner and its January; February came.
     expect(
@@ -335,6 +368,7 @@ describe('importing a backup', () => {
       skipped: [],
       owners: 0,
       periods: 0,
+      tankReadings: 0,
       settings: false,
       bank: false,
     })
@@ -359,6 +393,62 @@ describe('importing a backup', () => {
       'Período de 10/01/2026 a 10/02/2026: o app tem o período de 01/01/2026 a 01/02/2026 nessas datas; as leituras dele não foram importadas',
     ])
     expect(result).toMatchObject({ created: 3, readings: 0, periods: 0 })
+  })
+
+  test('a reading of the caixa d’água that does not fit is left out', async () => {
+    const backup = readBackup(await backupOf(await sourceApp()))
+    const target = openDatabase(':memory:')
+    target
+      .insert(tankReadings)
+      .values({ date: '2026-01-20', readingLiters: 7_000_000 })
+      .run()
+
+    const result = importBackup(target, backup)
+
+    // Higher than the app's reading ten days later.
+    expect(result.skipped).toEqual([
+      'Leitura da caixa d’água de 10/01/2026 (8.000 m³): não combina com as leituras do app; não foi importada',
+    ])
+    expect(result.tankReadings).toBe(2)
+  })
+
+  test('a new meter from the copy is one only among the app’s readings', async () => {
+    const backup = readBackup(await backupOf(await sourceApp()))
+    const target = openDatabase(':memory:')
+    target
+      .insert(tankReadings)
+      .values({ date: '2026-01-15', readingLiters: 2000 })
+      .run()
+    // A new meter after the copy's 5.000 m³, which doesn't fit the app's.
+    const reading = (date: string, liters: number, meterReplaced = false) => ({
+      ...(backup.tankReadings[0] as (typeof backup.tankReadings)[number]),
+      id: date === '2026-01-05' ? 1 : 2,
+      date,
+      readingLiters: liters,
+      meterReplaced,
+    })
+    backup.tankReadings = [
+      reading('2026-01-05', 5_000_000),
+      reading('2026-02-01', 10_000, true),
+    ]
+
+    const result = importBackup(target, backup)
+
+    expect(result.tankReadings).toBe(1)
+    expect(
+      target
+        .select({
+          date: tankReadings.date,
+          meterReplaced: tankReadings.meterReplaced,
+        })
+        .from(tankReadings)
+        .orderBy(asc(tankReadings.date))
+        .all(),
+    ).toEqual([
+      { date: '2026-01-15', meterReplaced: false },
+      // 10 m³ after the app's 2 m³: the same meter.
+      { date: '2026-02-01', meterReplaced: false },
+    ])
   })
 
   /** The copy with a second "Chácara 7", which has a March reading. */

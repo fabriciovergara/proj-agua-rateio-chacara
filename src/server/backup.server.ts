@@ -21,9 +21,17 @@ import {
   readings,
   type Settings,
   settings,
+  type TankReading,
+  tankReadings,
 } from '#/db/schema'
 import { UserFacingError } from '#/lib/errors'
-import { formatDateRange, rangesOverlap, todayISO } from '#/lib/periods'
+import {
+  formatDate,
+  formatDateRange,
+  rangesOverlap,
+  todayISO,
+} from '#/lib/periods'
+import { checkTankReading, formatTankReading } from '#/lib/tank'
 import {
   chacaraPeriod,
   chacarasInApp,
@@ -33,6 +41,7 @@ import {
   readingsInApp,
 } from './legacy.server'
 import { repricePeriod } from './periods.server'
+import { listTankReadings, syncReplacedMeters } from './tank.server'
 
 /**
  * A consistent copy of the whole database (VACUUM INTO works while the app
@@ -85,6 +94,7 @@ export type BackupContents = {
   owners: Owner[]
   properties: Property[]
   readings: Reading[]
+  tankReadings: TankReading[]
 }
 
 /** Tables every version of the app has (the first migration made them). */
@@ -158,6 +168,11 @@ export function readBackup(bytes: Uint8Array): BackupContents {
         .orderBy(asc(properties.id))
         .all(),
       readings: copy.select().from(readings).orderBy(asc(readings.id)).all(),
+      tankReadings: copy
+        .select()
+        .from(tankReadings)
+        .orderBy(asc(tankReadings.date))
+        .all(),
     }
   } catch (error) {
     if (error instanceof UserFacingError) throw error
@@ -175,6 +190,8 @@ export type BackupImportResult = LegacyImportResult & {
   owners: number
   /** Periods that came from the copy. */
   periods: number
+  /** Readings of the caixa d'água that came from the copy. */
+  tankReadings: number
   /** "Cobranças" and "Dados Bancários" came from the copy. */
   settings: boolean
   bank: boolean
@@ -204,6 +221,7 @@ export function importBackup(
     skipped: [],
     owners: 0,
     periods: 0,
+    tankReadings: 0,
     settings: false,
     bank: false,
   }
@@ -372,6 +390,37 @@ export function importBackup(
         result.readings++
       }
       for (const period of reprice) repricePeriod(tx, period)
+
+      // The caixa d'água: a day the app has keeps its reading; another one
+      // comes when it fits among the app's readings.
+      const tank = listTankReadings(tx)
+      const tankIds = idsOf(tank)
+      for (const { id, ...reading } of backup.tankReadings) {
+        if (tank.some((other) => other.date === reading.date)) continue
+        const entry = {
+          date: reading.date,
+          liters: reading.readingLiters,
+          meterReplaced: reading.meterReplaced,
+        }
+        // Any date: the copy may come from a server whose clock ran ahead.
+        if (checkTankReading(tank, entry, '9999-12-31').problem) {
+          result.skipped.push(
+            `Leitura da caixa d’água de ${formatDate(reading.date)} (${formatTankReading(reading.readingLiters)} m³): não combina com as leituras do app; não foi importada`,
+          )
+          continue
+        }
+        const added = tx
+          .insert(tankReadings)
+          .values({ ...reading, id: free(tankIds, id) })
+          .returning({ id: tankReadings.id })
+          .get()
+        tankIds.add(added.id)
+        tank.push({ ...entry, id: added.id })
+        tank.sort((a, b) => a.date.localeCompare(b.date))
+        result.tankReadings++
+      }
+      // A new meter in the copy may now follow other readings.
+      syncReplacedMeters(tx)
     })
   } catch (error) {
     // The copy's own rules are the app's, so this means a damaged file.

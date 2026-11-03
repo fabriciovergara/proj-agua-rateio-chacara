@@ -9,6 +9,7 @@ import {
   readings,
   sessions,
   settings,
+  tankReadings,
 } from '#/db/schema'
 import { createSession, setAppPassword } from './auth.server'
 import { dataSummary, deleteAllData } from './data.server'
@@ -56,6 +57,12 @@ function fillIn(db: ReturnType<typeof openDatabase>) {
       })),
     )
     .run()
+  db.insert(tankReadings)
+    .values([
+      { date: '2026-01-10', readingLiters: 5_000_000 },
+      { date: '2026-02-10', readingLiters: 5_130_250 },
+    ])
+    .run()
   db.insert(settings).values({ id: 1, groupName: 'Grupo Exemplo' }).run()
   db.insert(bankAccount).values({ id: 1, bankName: 'Banco Exemplo' }).run()
 }
@@ -67,6 +74,7 @@ test('counts what the app has', () => {
     owners: 0,
     readings: 0,
     periods: 0,
+    tankReadings: 0,
     settings: false,
     bank: false,
   })
@@ -76,6 +84,7 @@ test('counts what the app has', () => {
     owners: 2,
     readings: 2,
     periods: 2,
+    tankReadings: 2,
     settings: true,
     bank: true,
   })
@@ -94,6 +103,7 @@ test('wiping deletes all the data but not the passwords or sessions', async () =
     owners: 0,
     readings: 0,
     periods: 0,
+    tankReadings: 0,
     settings: false,
     bank: false,
   })
@@ -125,5 +135,10 @@ test('after wiping, new records are numbered from 1 again', () => {
     })
     .returning()
     .get()
-  expect([owner.id, chacara.id, period.id]).toEqual([1, 1, 1])
+  const tank = db
+    .insert(tankReadings)
+    .values({ date: '2026-02-10', readingLiters: 10_000 })
+    .returning()
+    .get()
+  expect([owner.id, chacara.id, period.id, tank.id]).toEqual([1, 1, 1, 1])
 })

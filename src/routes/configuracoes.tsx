@@ -657,7 +657,9 @@ function ImportSection() {
       }
       return imported.from === 'backup'
         ? 'Cópia de segurança importada.'
-        : 'Dados do sistema antigo importados.'
+        : imported.from === 'tank'
+          ? 'Leituras da caixa d’água importadas.'
+          : 'Dados do sistema antigo importados.'
     },
   })
 
@@ -695,6 +697,11 @@ function ImportSection() {
               do programa em Access (como Agua.mdb), sozinho ou num .zip, ou um
               .zip com T_Usuarios.csv, T_Fatura.csv e T_Consumo.csv.
             </li>
+            <li>
+              <strong>Leituras da caixa d’água</strong> (.xlsx): uma planilha do
+              Excel com uma linha “Data” e outra “Leitura” (m³), as leituras ao
+              lado, ou as duas colunas com as leituras embaixo.
+            </li>
           </ul>
           <p className="text-muted-foreground">
             Para deixar o app exatamente como estava na cópia, apague todos os
@@ -702,7 +709,7 @@ function ImportSection() {
           </p>
           <div className="flex max-w-md flex-col gap-2">
             <Label htmlFor={inputId} className="text-base">
-              Arquivo .sqlite, .mdb ou .zip
+              Arquivo .sqlite, .mdb, .zip ou .xlsx
             </Label>
             {/* No `accept`: iPhones grey out .sqlite files they don't know. */}
             <Input
@@ -726,17 +733,22 @@ function ImportSection() {
   )
 }
 
+const tankReadings = (value: number) =>
+  count(value, 'leitura da caixa d’água', 'leituras da caixa d’água')
+
 /** What else a backup brought besides chácaras and readings. */
 function backupExtras(result: Imported): string[] {
   if (result.from !== 'backup') return []
   return [
     result.periods > 0 && periodValues(result.periods),
+    result.tankReadings > 0 && tankReadings(result.tankReadings),
     result.settings && 'os dados das cobranças',
     result.bank && 'os dados bancários',
   ].filter((item) => typeof item === 'string')
 }
 
 function importedNothing(result: Imported) {
+  if (result.from === 'tank') return result.added === 0
   const owners = result.from === 'backup' ? result.owners : 0
   return (
     result.created + result.readings + owners === 0 &&
@@ -745,6 +757,7 @@ function importedNothing(result: Imported) {
 }
 
 function ImportSummary({ result }: { result: Imported }) {
+  if (result.from === 'tank') return <TankImportSummary result={result} />
   const added = [
     count(result.created, 'chácara nova', 'chácaras novas'),
     result.from === 'backup' &&
@@ -776,19 +789,68 @@ function ImportSummary({ result }: { result: Imported }) {
             </li>
           )}
           {result.skipped.length > 0 && (
+            <SkippedList skipped={result.skipped} />
+          )}
+        </ul>
+      </AlertDescription>
+    </Alert>
+  )
+}
+
+/** A list of the import's left-outs, under its title. */
+function SkippedList({ skipped }: { skipped: string[] }) {
+  return (
+    <li>
+      {count(
+        skipped.length,
+        'registro não importado',
+        'registros não importados',
+      )}
+      :
+      <ul className="mt-1 list-[circle] pl-5 text-muted-foreground">
+        {skipped.map((line) => (
+          <li key={line}>{line}</li>
+        ))}
+      </ul>
+    </li>
+  )
+}
+
+function TankImportSummary({
+  result,
+}: {
+  result: Extract<Imported, { from: 'tank' }>
+}) {
+  return (
+    <Alert role="status" className="border-primary/30 bg-secondary">
+      <CircleCheck aria-hidden="true" />
+      <AlertTitle className="text-base">Importação concluída</AlertTitle>
+      <AlertDescription className="text-base text-foreground">
+        <ul className="list-disc space-y-1 pl-5">
+          <li>
+            {count(
+              result.added,
+              'leitura da caixa d’água importada',
+              'leituras da caixa d’água importadas',
+            )}{' '}
+            da planilha “{result.sheet}”.{' '}
+            {result.added > 0 && (
+              <Link
+                to="/caixa-dagua"
+                className="font-semibold text-primary underline"
+              >
+                Ver na tela Caixa d’água
+              </Link>
+            )}
+          </li>
+          {result.existing > 0 && (
             <li>
-              {count(
-                result.skipped.length,
-                'registro não importado',
-                'registros não importados',
-              )}
-              :
-              <ul className="mt-1 list-[circle] pl-5 text-muted-foreground">
-                {result.skipped.map((line) => (
-                  <li key={line}>{line}</li>
-                ))}
-              </ul>
+              Já estavam no app e não mudaram:{' '}
+              {count(result.existing, 'dia', 'dias')} com leitura.
             </li>
+          )}
+          {result.skipped.length > 0 && (
+            <SkippedList skipped={result.skipped} />
           )}
         </ul>
       </AlertDescription>
@@ -810,6 +872,7 @@ function whatWouldBeDeleted(summary: DataSummary): string[] {
     summary.readings > 0 &&
       `${count(summary.readings, 'leitura', 'leituras')}, com os pagamentos`,
     summary.periods > 0 && periodValues(summary.periods),
+    summary.tankReadings > 0 && tankReadings(summary.tankReadings),
     summary.settings && 'os dados das cobranças',
     summary.bank && 'os dados bancários',
   ].filter((item) => typeof item === 'string')
@@ -824,8 +887,8 @@ function WipeSection({ summary }: { summary: DataSummary }) {
         <CardTitle className="text-2xl">Apagar todos os dados</CardTitle>
         <CardDescription className="text-base">
           Para começar do zero: apaga as chácaras, os proprietários, as leituras
-          e os pagamentos, os períodos, os dados das cobranças e os dados
-          bancários. As senhas não mudam.
+          e os pagamentos, os períodos, as leituras da caixa d’água, os dados
+          das cobranças e os dados bancários. As senhas não mudam.
         </CardDescription>
       </CardHeader>
       <CardFooter className="flex flex-wrap items-center gap-x-4 gap-y-3">

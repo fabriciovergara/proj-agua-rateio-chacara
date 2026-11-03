@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { ACCOUNT_TYPES, PIX_KEY_TYPES, STATES } from './domain'
 import { isISODate } from './periods'
 import { MAX_PIX_KEY_LENGTH, validatePixKey } from './pix'
+import { MAX_TANK_LITERS } from './tank'
 
 /*
  * Validation shared by the forms (instant feedback) and the server functions
@@ -224,6 +225,21 @@ export const updateReadingSchema = z
 export type UpdateReadingInput = z.input<typeof updateReadingSchema>
 
 export const setPaidSchema = z.object({ id: idSchema, paid: z.boolean() })
+
+/** A reading of the caixa d'água's meter: new, or a correction (`id`). */
+export const tankReadingSchema = z.object({
+  id: idSchema.optional(),
+  date: isoDateSchema,
+  /** m³ × 1000: the meter shows the liters too. */
+  liters: z
+    .number({ error: 'Informe a leitura.' })
+    .int()
+    .min(0, 'A leitura não pode ser negativa.')
+    .max(MAX_TANK_LITERS, 'Leitura muito grande.'),
+  /** Lower than the reading before: a new meter was installed. */
+  meterReplaced: z.boolean().optional(),
+})
+export type TankReadingInput = z.input<typeof tankReadingSchema>
 
 /** First message per field, for showing next to each input. */
 export function fieldErrors(error: z.ZodError): Record<string, string> {

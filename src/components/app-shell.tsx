@@ -1,6 +1,7 @@
 import { Link, useRouterState } from '@tanstack/react-router'
 import {
   ChartColumnBig,
+  Droplets,
   FileText,
   Gauge,
   History,
@@ -12,6 +13,7 @@ import { Button } from '#/components/ui/button'
 
 const NAVIGATION = [
   { to: '/', label: 'Leituras', icon: Gauge, exact: true },
+  { to: '/caixa-dagua', label: 'Caixa d’água', icon: Droplets, exact: false },
   { to: '/relatorios', label: 'Relatórios', icon: FileText, exact: false },
   { to: '/cadastros', label: 'Cadastros', icon: Users, exact: false },
   { to: '/historico', label: 'Histórico', icon: History, exact: false },
